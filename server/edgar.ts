@@ -305,14 +305,81 @@ function extractMaturity(facts: Record<string, string>, domain: string): string 
   return "—";
 }
 
+/**
+ * Parse ix:footnote arcs from a BDC's iXBRL HTM filing to get the definitive
+ * set of XBRL context IDs that are on non-accrual as of 2025-12-31.
+ *
+ * Every BDC filer (ARCC, BXSL, OBDC, FSK, ADS, GSCR) uses this pattern:
+ *   <ix:footnote id="fn-X">Loan was on non-accrual status as of December 31, 2025.</ix:footnote>
+ *   <ix:relationship fromRefs="f-111 f-222" toRefs="fn-X" />
+ * The fromRefs are iXBRL fact IDs whose contextRef attributes point to the
+ * InvestmentIdentifierAxis context for that position.
+ */
+function extractNonAccrualContextIds(htm: string): Set<string> {
+  const naCtxIds = new Set<string>();
+
+  // 1. Find footnote IDs with non-accrual text (for 2025, not prior year)
+  const fnRe = /<ix:footnote[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/ix:footnote>/gi;
+  const naFnIds: string[] = [];
+  let fnMatch: RegExpExecArray | null;
+  while ((fnMatch = fnRe.exec(htm)) !== null) {
+    const [, fnId, rawTxt] = fnMatch;
+    const txt = rawTxt.replace(/<[^>]+>/g, " ").trim();
+    if (!/non.accrual/i.test(txt)) continue;
+    // Exclude footnotes that are explicitly for a prior year only
+    const year2024 = txt.includes("2024") && !txt.includes("2025");
+    if (year2024) continue;
+    naFnIds.push(fnId);
+  }
+
+  if (naFnIds.length === 0) return naCtxIds;
+
+  // 2. Find ix:relationship arcs that link facts to these footnotes
+  for (const fnId of naFnIds) {
+    // Two possible attribute orderings
+    const patterns = [
+      new RegExp(`fromRefs="([^"]+)"[^>]*toRefs="[^"]*\\b${fnId}\\b`),
+      new RegExp(`toRefs="[^"]*\\b${fnId}\\b[^"]*"[^>]*fromRefs="([^"]+)"`),
+    ];
+    for (const pat of patterns) {
+      const relM = pat.exec(htm);
+      if (!relM) continue;
+      // Group 1 will be fromRefs for pattern 1, but toRefs for pattern 2 — pick the one without fnId
+      const g1 = relM[1];
+      // For pattern 2 there may be a second group
+      const factIdsStr = g1.includes(fnId) ? (relM[2] ?? "") : g1;
+      for (const factId of factIdsStr.trim().split(/\s+/)) {
+        if (!factId) continue;
+        // Resolve fact ID → contextRef
+        const idx = htm.indexOf(`id="${factId}"`);
+        if (idx < 0) continue;
+        const tagStart = htm.lastIndexOf("<", idx);
+        const tagEnd   = htm.indexOf(">", idx);
+        const tag      = htm.slice(tagStart, tagEnd + 1);
+        const ctxM     = /contextRef="([^"]+)"/.exec(tag);
+        if (ctxM) naCtxIds.add(ctxM[1]);
+      }
+      break;
+    }
+  }
+
+  return naCtxIds;
+}
+
+/**
+ * Fallback heuristic: only flag non-accrual when domain text explicitly says so,
+ * OR the position is very deeply distressed (FV < 5% of par AND fv > 0).
+ * The old 50% threshold was wrong — it caught unfunded revolvers (par > 0, fv ≈ 0).
+ */
 function inferNonAccrual(par: number, fv: number, domain: string): boolean {
-  if (/non-accrual|non\s+accrual/i.test(domain)) return true;
-  if (par > 0 && fv >= 0 && fv / par < 0.50) return true;
+  if (/non.accrual/i.test(domain)) return true;
+  // Deep distress ONLY — not unfunded commitments (those have near-zero FV)
+  if (par > 0.5 && fv > 0.5 && fv / par < 0.05) return true;
   return false;
 }
 
 /** Parse the XBRL instance XML string into investment records. */
-function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
+function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<string> = new Set()): RawInvestment[] {
   const investments: RawInvestment[] = [];
 
   // ── 1. Build context id → domain text map for 2025-12-31 ──────────────────
@@ -403,7 +470,8 @@ function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
     const { company, industry, investmentType: invType } = parseDomain(domain);
     const rate     = buildRate(f, domain);
     const maturity = extractMaturity(f, domain);
-    const nonAccrual = inferNonAccrual(par, fv, domain);
+    // Use ix:footnote-derived set first (authoritative), then fallback heuristic
+    const nonAccrual = naContextIds.has(ctxId) || inferNonAccrual(par, fv, domain);
 
     investments.push({
       fund: fundId,
@@ -549,12 +617,33 @@ export async function extractFund(
     }
     console.log(`[edgar] Found filing: ${filing.accessionNumber} | ${filing.primaryDocument}`);
 
-    // Step 2+3: Fetch and parse XBRL instance
+    // Step 2: Fetch HTM to extract definitive non-accrual context IDs via ix:footnote
+    const htmCacheKey = `htm_${fund.cik}_${PERIOD.replace(/-/g, "")}`;
+    let naContextIds = new Set<string>();
+    try {
+      let htmContent = cacheGet<string>(htmCacheKey);
+      if (!htmContent) {
+        const numericCik = fund.cik.replace(/^0+/, "");
+        const accNodash  = filing.accessionNumber.replace(/-/g, "");
+        const htmUrl = `https://www.sec.gov/Archives/edgar/data/${numericCik}/${accNodash}/${filing.primaryDocument}`;
+        console.log(`[edgar] Fetching HTM for ${fund.id} non-accrual detection...`);
+        htmContent = await fetchWithRetry(htmUrl);
+        cacheSet(htmCacheKey, htmContent);
+      } else {
+        console.log(`[edgar] HTM cache hit for ${fund.id}`);
+      }
+      naContextIds = extractNonAccrualContextIds(htmContent as string);
+      console.log(`[edgar] Non-accrual context IDs for ${fund.id}: ${naContextIds.size}`);
+    } catch (htmErr) {
+      console.warn(`[edgar] HTM non-accrual extraction failed for ${fund.id}:`, htmErr);
+    }
+
+    // Step 3: Fetch and parse XBRL instance, passing NA context IDs
     let investments: RawInvestment[] = [];
     try {
       console.log(`[edgar] Fetching XBRL instance for ${fund.id}...`);
       const xml = await fetchXbrlXml(fund.cik, filing);
-      investments = parseXbrlInvestments(xml, fund.id);
+      investments = parseXbrlInvestments(xml, fund.id, naContextIds);
       console.log(`[edgar] XBRL parsed: ${investments.length} investments for ${fund.id}`);
     } catch (xmlErr) {
       console.warn(`[edgar] XBRL parse failed for ${fund.id}:`, xmlErr);
