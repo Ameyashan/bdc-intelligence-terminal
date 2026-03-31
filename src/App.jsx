@@ -12,13 +12,14 @@ export default function App() {
     async function load(refresh = false) {
       setError(null);
       try {
-        // On Vercel (and local), serve the pre-built static JSON from /data/bdc-data.json
-        // For the local dev proxy, use the live API endpoint instead
-        const base = window.location.href.replace(/\/$/, '');
-        const isProxy = base.includes('/port/');
-        const url = isProxy
-          ? `${base}/api/bdc-data${refresh ? "?refresh=1" : ""}` // local proxy: live API
-          : `${window.location.origin}/data/bdc-data.json`;       // Vercel/prod: static file
+        // Route to the right data source:
+        //  - Local proxy (/port/5000): use live EDGAR API endpoint
+        //  - Static host (Vercel, S3, GitHub Pages): use relative path to bundled JSON
+        const href = window.location.href;
+        const isLocalProxy = href.includes('/port/');
+        const url = isLocalProxy
+          ? `${href.replace(/\/$/, '')}/api/bdc-data${refresh ? "?refresh=1" : ""}` // local dev
+          : './data/bdc-data.json';  // relative path — works on any static host
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
