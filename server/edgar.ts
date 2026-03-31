@@ -260,6 +260,35 @@ function parseDomain(rawDomain: string): { company: string; industry: string; in
   return { company, industry, investmentType: extractInvestmentType(domain) };
 }
 
+// ─── FX rates (CCY → USD) as of Dec 31 2025 — ECB official reference rates ──────────
+// USD/EUR = 1.1750; CCY_to_USD = USD_per_EUR / CCY_per_EUR
+// Source: https://data-api.ecb.europa.eu/service/data/EXR/D.*.EUR.SP00.A?startPeriod=2025-12-31
+const FX_TO_USD: Record<string, number> = {
+  U_USD: 1.000000,
+  U_EUR: 1.175000,
+  U_GBP: 1.346551,
+  U_CAD: 0.730358,
+  U_AUD: 0.668335,
+  U_CHF: 1.261542,
+  U_SEK: 0.108580,
+  U_NOK: 0.099215,
+  U_DKK: 0.157319,
+  U_JPY: 0.006383,
+  U_KRW: 0.000692,
+  // lowercase aliases (some filers use lowercase unitRef)
+  usd:   1.000000,
+  eur:   1.175000,
+  gbp:   1.346551,
+  cad:   0.730358,
+  aud:   0.668335,
+  chf:   1.261542,
+  sek:   0.108580,
+  nok:   0.099215,
+  dkk:   0.157319,
+  jpy:   0.006383,
+  krw:   0.000692,
+};
+
 // ─── Rate and maturity builders ───────────────────────────────────────────────
 
 function safeNum(v: string | null | undefined): number {
@@ -430,10 +459,10 @@ function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<str
   ];
 
   const factsByCtx: Record<string, Record<string, string>> = {};
+  // Also track par unitRef per context for FX conversion
+  const parUnitRef: Record<string, string> = {};
 
   for (const tag of TARGET_TAGS) {
-    // [a-zA-Z0-9_-]+ matches namespaces including 'us-gaap'
-    // ([^>]*) captures all attrs (newlines included since [^>] != [^\n])
     const pattern = new RegExp(
       `<[a-zA-Z0-9_-]*:${tag}([^>]*)>([^<]*)`,
       "g"
@@ -448,6 +477,11 @@ function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<str
       if (!(ctxRef in contextMap)) continue;
       if (!factsByCtx[ctxRef]) factsByCtx[ctxRef] = {};
       factsByCtx[ctxRef][tag] = value;
+      // Capture unitRef for par (needed for FX conversion)
+      if (tag === "InvestmentOwnedBalancePrincipalAmount") {
+        const unitM = attrs.match(/unitRef="([^"]+)"/);
+        if (unitM) parUnitRef[ctxRef] = unitM[1];
+      }
     }
   }
 
@@ -455,14 +489,23 @@ function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<str
   for (const [ctxId, domain] of Object.entries(contextMap)) {
     const f = factsByCtx[ctxId] ?? {};
 
-    const par  = safeNum(f["InvestmentOwnedBalancePrincipalAmount"]) / 1e6;
-    const cost = safeNum(f["InvestmentOwnedAtCost"]) / 1e6;
-    const fv   = safeNum(f["InvestmentOwnedAtFairValue"] ?? f["InvestmentOwnedFairValueBalance"]) / 1e6;
+    // Convert par to USD using ECB Dec 31 2025 FX rates
+    const parRaw  = safeNum(f["InvestmentOwnedBalancePrincipalAmount"]);
+    const parUnit = parUnitRef[ctxId] ?? "U_USD";
+    const fxRate  = FX_TO_USD[parUnit] ?? 1.0;
+    const par  = (parRaw * fxRate) / 1e6;
+    const cost = safeNum(f["InvestmentOwnedAtCost"]) / 1e6;       // always USD
+    const fv   = safeNum(f["InvestmentOwnedAtFairValue"] ?? f["InvestmentOwnedFairValueBalance"]) / 1e6;  // always USD
 
-    // Skip equity/warrant positions with 0 par (shares-based) that have negligible FV
-    // But keep equity positions that have meaningful FV
-    if (par === 0 && cost === 0 && fv === 0) continue;
-    if (par === 0 && fv === 0 && cost === 0) continue;
+    // Skip positions with no value at all
+    if (parRaw === 0 && cost === 0 && fv === 0) continue;
+
+    // Skip unfunded commitments: these are revolvers/delayed-draw TLs that
+    // haven't been drawn. They have a par commitment but FV ≈ 0 or slightly
+    // negative (marked as a small liability). They are NOT stressed positions.
+    // Threshold: FV < 1% of par AND |fv| < $2M (tiny liability or unfunded)
+    if (par > 0.5 && fv <= 0) continue;          // negative FV = unfunded liability
+    if (par > 0.5 && fv > 0 && fv / par < 0.01 && fv < 2) continue;  // near-zero = unfunded
 
     // Skip money market / cash entries
     if (/money\s+market|cash\s+equivalent/i.test(domain)) continue;
