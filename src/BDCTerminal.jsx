@@ -268,6 +268,7 @@ const TABS = [
   { id: "industry",  label: "INDUSTRY CONC." },
   { id: "search",    label: "BORROWER SEARCH" },
   { id: "stress",    label: "STRESS REGISTER" },
+  { id: "gslens",    label: "GS LENS ⚡", accent: true },
 ];
 
 function TabBar({ active, onChange }) {
@@ -285,8 +286,8 @@ function TabBar({ active, onChange }) {
               fontSize: 10,
               fontWeight: isActive ? 700 : 400,
               padding: "8px 18px",
-              color: isActive ? GREEN : TEXT_DIM,
-              borderBottom: isActive ? `2px solid ${GREEN}` : "2px solid transparent",
+              color: isActive ? (tab.accent ? AMBER : GREEN) : (tab.accent ? ORANGE : TEXT_DIM),
+              borderBottom: isActive ? `2px solid ${tab.accent ? AMBER : GREEN}` : "2px solid transparent",
               borderRight: `1px solid ${BORDER}`,
               letterSpacing: 0.8,
               whiteSpace: "nowrap",
@@ -1057,6 +1058,261 @@ function StressRegisterTab({ investments, selectedFunds }) {
   );
 }
 
+// ─── TAB 6: GS LENS ───────────────────────────────────────────────────────────────────
+// Borrowers that appear in GSCR or GSBD AND in at least one peer fund.
+// Highlights divergence: same borrower, GS marked stressed/NA, peer at par.
+function GSLensTab({ investments }) {
+  const [filterMode, setFilterMode] = useState("diverge");
+  const [sortKey, setSortKey] = useState("divergence");
+  const [sortDir, setSortDir] = useState("desc");
+
+  const GS_SET   = new Set(["GSCR", "GSBD"]);
+  const PEER_SET = new Set(["ARCC", "BXSL", "OBDC", "ADS", "FSK"]);
+
+  const crossFund = useMemo(() => {
+    function normName(name) {
+      return name.toLowerCase()
+        .replace(/\(dba\s+[^)]+\)/gi, "").replace(/\([^)]+\)/g, "")
+        .replace(/\b(llc|inc|corp|ltd|lp|plc|holdings?|group|co\.?)\b\.?/gi, "")
+        .replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+    }
+
+    const byNorm = {}, canonicalMap = {};
+    for (const inv of investments) {
+      const norm = normName(inv.company);
+      if (!norm || norm.length < 4) continue;
+      if (!byNorm[norm]) byNorm[norm] = {};
+      if (!byNorm[norm][inv.fund]) byNorm[norm][inv.fund] = [];
+      byNorm[norm][inv.fund].push(inv);
+      if (!canonicalMap[norm] || inv.company.length > canonicalMap[norm].length)
+        canonicalMap[norm] = inv.company;
+    }
+
+    const rows = [];
+    for (const [norm, fundMap] of Object.entries(byNorm)) {
+      const gsFunds   = Object.keys(fundMap).filter(f => GS_SET.has(f));
+      const peerFunds = Object.keys(fundMap).filter(f => PEER_SET.has(f));
+      if (!gsFunds.length || !peerFunds.length) continue;
+
+      const summary = {};
+      for (const [fid, invs] of Object.entries(fundMap)) {
+        const debt = invs.filter(i => i.par > 0);
+        const tPar = debt.reduce((s, i) => s + i.par, 0);
+        const tFv  = debt.reduce((s, i) => s + i.fv,  0);
+        const isNA = invs.some(i => i.nonAccrual);
+        const ratio = tPar > 0 ? tFv / tPar : null;
+        const rates = invs.map(i => i.rate).filter(r => r && r !== "—");
+        summary[fid] = { par: tPar, fv: tFv, ratio: ratio && ratio <= 1.5 ? ratio : null, isNA, rate: rates[0] || "—" };
+      }
+
+      const gsNa     = gsFunds.some(f => summary[f].isNA);
+      const gsRatios  = gsFunds.map(f => summary[f].ratio).filter(r => r !== null);
+      const peerRatios = peerFunds.map(f => summary[f].ratio).filter(r => r !== null);
+      const gsRatio   = gsRatios.length   ? Math.min(...gsRatios)   : null;
+      const peerRatio = peerRatios.length ? Math.min(...peerRatios) : null;
+      const gap = (peerRatio !== null && gsRatio !== null) ? peerRatio - gsRatio : null;
+      const diverge = (gsNa && peerRatio !== null && peerRatio >= 0.90) || (gap !== null && gap > 0.10);
+
+      rows.push({
+        company: canonicalMap[norm],
+        gsFunds, peerFunds, summary,
+        gsNa, gsRatio, peerRatio, gap, diverge,
+        gsParTotal:   gsFunds.reduce((s, f) => s + (summary[f].par || 0), 0),
+        peerParTotal: peerFunds.reduce((s, f) => s + (summary[f].par || 0), 0),
+      });
+    }
+    return rows;
+  }, [investments]);
+
+  const filtered = useMemo(() => {
+    if (filterMode === "diverge") return crossFund.filter(x => x.diverge);
+    if (filterMode === "na")      return crossFund.filter(x => x.gsNa);
+    return crossFund;
+  }, [crossFund, filterMode]);
+
+  const sorted = useMemo(() => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      if (sortKey === "company")   return dir * a.company.localeCompare(b.company);
+      if (sortKey === "gsRatio")   return dir * ((a.gsRatio ?? 999) - (b.gsRatio ?? 999));
+      if (sortKey === "peerRatio") return dir * ((a.peerRatio ?? 999) - (b.peerRatio ?? 999));
+      if (sortKey === "gap")       return dir * ((a.gap ?? -999) - (b.gap ?? -999));
+      if (sortKey === "gsPar")     return dir * (a.gsParTotal - b.gsParTotal);
+      const aScore = (a.gsNa ? -1 : a.gsRatio ?? 1) - (a.peerRatio ?? 1);
+      const bScore = (b.gsNa ? -1 : b.gsRatio ?? 1) - (b.peerRatio ?? 1);
+      return dir * (aScore - bScore);
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  const totalDiverge = crossFund.filter(x => x.diverge).length;
+  const totalNa      = crossFund.filter(x => x.gsNa).length;
+
+  function handleSort(key) {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("asc"); }
+  }
+  const arrow = (key) => sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+
+  const btnStyle = (active, color, bg) => ({
+    fontFamily: "JetBrains Mono, monospace", fontSize: 10, background: active ? bg : BG_ALT,
+    border: `1px solid ${active ? color : BORDER}`, color: active ? color : TEXT_DIM,
+    padding: "4px 12px", cursor: "pointer", letterSpacing: 1,
+  });
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14, flex: 1, overflow: "hidden" }}>
+
+      {/* Header */}
+      <div style={{ border: `1px solid ${AMBER}`, background: "#1a1400", padding: "10px 16px", display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, color: AMBER, letterSpacing: 1.5 }}>⚡ GS LENS — CROSS-FUND BORROWER DIVERGENCE</div>
+        <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, color: TEXT_DIM, lineHeight: 1.7 }}>
+          Borrowers in <span style={{ color: BLUE }}>GSCR or GSBD</span> that also appear in a peer fund.
+          &nbsp;<span style={{ color: AMBER }}>Divergence</span> = peer marks same borrower &gt;10pp higher,
+          or peer is at PAR while GS is on <span style={{ color: RED }}>non-accrual</span>.
+        </div>
+        <div style={{ display: "flex", gap: 20, marginLeft: "auto", fontFamily: "JetBrains Mono, monospace", fontSize: 11, fontWeight: 700 }}>
+          <span style={{ color: AMBER }}>{crossFund.length} SHARED</span>
+          <span style={{ color: ORANGE }}>{totalDiverge} DIVERGE</span>
+          <span style={{ color: RED }}>{totalNa} GS NA</span>
+        </div>
+      </div>
+
+      {/* Filter */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={btnStyle(filterMode==="diverge", ORANGE, "#1a0d00")} onClick={() => setFilterMode("diverge")}>⚡ DIVERGENCE ({totalDiverge})</button>
+        <button style={btnStyle(filterMode==="na",      RED,    "#1a0000")} onClick={() => setFilterMode("na")}>✕ GS NON-ACCRUAL ({totalNa})</button>
+        <button style={btnStyle(filterMode==="all",     TEXT_DIM, BG_ALT)} onClick={() => setFilterMode("all")}>ALL SHARED ({crossFund.length})</button>
+      </div>
+
+      {/* Table */}
+      <div style={{ flex: 1, overflow: "auto" }}>
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              {[
+                { key: "company",   label: "Borrower" },
+                { key: null,        label: "GS Funds" },
+                { key: "gsPar",     label: "GS Par" },
+                { key: "gsRatio",   label: "GS FV/PAR" },
+                { key: null,        label: "GS Status" },
+                { key: null,        label: "Peers" },
+                { key: "peerRatio", label: "Peer FV/PAR" },
+                { key: "gap",       label: "Gap ↑" },
+                { key: null,        label: "Signal" },
+              ].map(({ key, label }) => (
+                <th key={label} className={key ? "bdc-th" : undefined}
+                  onClick={key ? () => handleSort(key) : undefined}
+                  style={{ ...thStyle, cursor: key ? "pointer" : "default" }}>
+                  {label}{key ? arrow(key) : ""}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((row, i) => {
+              const gsStatus = row.gsNa
+                ? { label: "NON-ACCR", color: RED }
+                : statusFromRatio((row.gsRatio ?? 1) * 100, false);
+              const peerStatus = row.peerRatio !== null
+                ? statusFromRatio((row.peerRatio ?? 1) * 100, false) : null;
+              const gap = row.gap;
+              const gapColor = gap === null ? TEXT_DIM
+                : gap > 0.20 ? RED : gap > 0.10 ? ORANGE : gap > 0 ? AMBER : GREEN;
+              const rowBg = row.gsNa ? "#1a0000" : row.diverge ? "#0f0a00" : i % 2 === 0 ? BG : BG_ALT;
+
+              return (
+                <tr key={i} className="bdc-tr" style={{ background: rowBg }}>
+
+                  {/* Borrower */}
+                  <td style={{ ...tdStyle, maxWidth: 230, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
+                    {row.company}
+                  </td>
+
+                  {/* GS Funds */}
+                  <td style={tdStyle}>
+                    {row.gsFunds.map(f => (
+                      <span key={f} style={{ color: BLUE, fontWeight: 700, marginRight: 5, fontSize: 11 }}>{f}</span>
+                    ))}
+                  </td>
+
+                  {/* GS Par */}
+                  <td style={tdStyle}>{fmtM(row.gsParTotal)}</td>
+
+                  {/* GS FV/PAR */}
+                  <td style={tdStyle}>
+                    {row.gsRatio !== null ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <InlineBar pct={Math.min(row.gsRatio * 100, 100)} color={gsStatus.color} width={40} height={3} />
+                        <span style={{ color: gsStatus.color, fontSize: 10 }}>{(row.gsRatio * 100).toFixed(1)}%</span>
+                      </div>
+                    ) : <span style={{ color: TEXT_DIM }}>—</span>}
+                  </td>
+
+                  {/* GS Status badge */}
+                  <td style={tdStyle}><Badge label={gsStatus.label} color={gsStatus.color} /></td>
+
+                  {/* Peer funds — colored by their individual status */}
+                  <td style={tdStyle}>
+                    {row.peerFunds.map(f => {
+                      const ps = row.summary[f];
+                      const pr = ps.ratio;
+                      const pSt = pr !== null ? statusFromRatio(pr * 100, ps.isNA) : null;
+                      return (
+                        <span key={f} title={`${f}: ${pr !== null ? (pr*100).toFixed(1)+"%" : "—"}`}
+                          style={{ marginRight: 6, color: pSt?.color ?? TEXT_DIM, fontSize: 10, fontWeight: 600 }}>
+                          {f}
+                        </span>
+                      );
+                    })}
+                  </td>
+
+                  {/* Peer FV/PAR */}
+                  <td style={tdStyle}>
+                    {row.peerRatio !== null && peerStatus ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <InlineBar pct={Math.min(row.peerRatio * 100, 100)} color={peerStatus.color} width={40} height={3} />
+                        <span style={{ color: peerStatus.color, fontSize: 10 }}>{(row.peerRatio * 100).toFixed(1)}%</span>
+                      </div>
+                    ) : <span style={{ color: TEXT_DIM }}>—</span>}
+                  </td>
+
+                  {/* Gap */}
+                  <td style={{ ...tdStyle, fontWeight: 700 }}>
+                    {gap !== null
+                      ? <span style={{ color: gapColor }}>{gap > 0 ? "+" : ""}{(gap * 100).toFixed(1)}pp</span>
+                      : <span style={{ color: TEXT_DIM }}>—</span>}
+                  </td>
+
+                  {/* Signal */}
+                  <td style={tdStyle}>
+                    {row.gsNa && row.peerRatio !== null && row.peerRatio >= 0.90
+                      ? <Badge label="NA ≠ PAR" color={RED} />
+                      : row.diverge
+                      ? <Badge label="DIVERGE" color={ORANGE} />
+                      : <span style={{ color: TEXT_DIM, fontSize: 10 }}>ALIGNED</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {sorted.length === 0 && (
+          <div style={{ padding: 60, textAlign: "center", fontFamily: "JetBrains Mono, monospace", color: TEXT_DIM, fontSize: 12 }}>
+            NO RESULTS FOR CURRENT FILTER
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 9, color: TEXT_DIM, letterSpacing: 0.8, borderTop: `1px solid ${BORDER}`, paddingTop: 8 }}>
+        GAP = peer lowest FV/PAR minus GS lowest FV/PAR (positive = peer marks higher than GS, a divergence signal).
+        Hover peer fund names to see their individual FV/PAR.
+        Borrower matching uses fuzzy name normalization (removes legal suffixes, parentheticals). Period: Dec 31 2025.
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function BDCTerminal({ data }) {
   const [selectedFunds, setSelectedFunds] = useState(new Set(ALL_FUNDS));
@@ -1141,6 +1397,9 @@ export default function BDCTerminal({ data }) {
         )}
         {activeTab === "stress" && (
           <StressRegisterTab investments={investments} selectedFunds={selectedFunds} />
+        )}
+        {activeTab === "gslens" && (
+          <GSLensTab investments={investments} />
         )}
       </div>
     </div>
