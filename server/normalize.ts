@@ -154,7 +154,7 @@ const FUND_CIK = new Map<string, string>([
 
 // ─── Company name deduplication ──────────────────────────────────────────────
 
-function normalizeCompanyName(name: string): string {
+export function normalizeCompanyName(name: string): string {
   return name
     .toLowerCase()
     .replace(/\(dba\s+[^)]+\)/gi, "")

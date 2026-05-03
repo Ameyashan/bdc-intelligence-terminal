@@ -1,5 +1,16 @@
 // ─── Shared type definitions ──────────────────────────────────────────────────
 
+export interface PeriodSnapshot {
+  period: string;        // e.g. "2025-12-31"
+  par: number;
+  cost: number;
+  fv: number;
+  rate: string;
+  nonAccrual: boolean;
+}
+
+export type SeriesMatchConfidence = "high" | "low";
+
 export interface RawInvestment {
   fund: string;
   company: string;
@@ -7,10 +18,12 @@ export interface RawInvestment {
   investmentType: string;
   rate: string;
   maturity: string;
-  par: number;    // USD millions
-  cost: number;   // USD millions
-  fv: number;     // USD millions
-  nonAccrual: boolean;
+  par: number;    // USD millions (latest period)
+  cost: number;   // USD millions (latest period)
+  fv: number;     // USD millions (latest period)
+  nonAccrual: boolean;          // latest period
+  series?: PeriodSnapshot[];    // ordered latest → oldest; absent on pre-time-series data
+  seriesMatchConfidence?: SeriesMatchConfidence;
 }
 
 export interface FundSummary {
@@ -37,7 +50,8 @@ export interface BDCData {
 export interface ExtractionStatus {
   fund: string;
   cik: string;
-  status: "ok" | "error" | "cached";
+  period?: string;            // present in multi-period extractions
+  status: "ok" | "error" | "cached" | "unavailable";
   investmentCount: number;
   durationMs: number;
   error?: string;

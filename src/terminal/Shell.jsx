@@ -145,6 +145,7 @@ export const TABS = [
   { id: "soi",       label: "Schedule of Investments" },
   { id: "stress",    label: "Stress Register" },
   { id: "gslens",    label: "GS Lens", accent: true },
+  { id: "signals",   label: "Signals", accent: true },
 ];
 
 export function TabBar({ theme, active, onChange }) {

@@ -16,7 +16,21 @@ import { cacheGet, cacheSet } from "./cache.js";
 import type { RawInvestment, ExtractionStatus } from "./types.js";
 
 const USER_AGENT = "BDCResearchTool/1.0 ameya.shanbhag@gmail.com";
-const PERIOD = "2025-12-31";
+
+// Periods to ingest, ordered LATEST first. Each period names its expected SEC form
+// type (10-K for fiscal year-end, 10-Q for interim quarters). The XBRL parsers,
+// non-accrual footnote scraper, and HTM fallback are all period-parameterized so
+// adding more historical quarters is just a matter of extending this array.
+export interface PeriodConfig {
+  period: string;       // YYYY-MM-DD
+  formTypes: string[];  // SEC form names accepted for this period
+}
+export const PERIODS: PeriodConfig[] = [
+  { period: "2025-12-31", formTypes: ["10-K"] },
+  { period: "2025-09-30", formTypes: ["10-Q"] },
+  { period: "2025-06-30", formTypes: ["10-Q"] },
+];
+export const LATEST_PERIOD = PERIODS[0].period;
 
 // ─── Fund registry ────────────────────────────────────────────────────────────
 
@@ -72,7 +86,7 @@ interface FilingInfo {
   isInlineXBRL: boolean;
 }
 
-async function findFiling(cik: string): Promise<FilingInfo | null> {
+async function findFiling(cik: string, period: string, formTypes: string[]): Promise<FilingInfo | null> {
   const url = `https://data.sec.gov/submissions/CIK${cik}.json`;
   const cacheKey = `submissions_${cik}`;
 
@@ -94,7 +108,7 @@ async function findFiling(cik: string): Promise<FilingInfo | null> {
   const xbrl: number[]    = recent.isInlineXBRL ?? [];
 
   for (let i = 0; i < forms.length; i++) {
-    if (forms[i] === "10-K" && periods[i] === PERIOD) {
+    if (formTypes.includes(forms[i]) && periods[i] === period) {
       return {
         accessionNumber: accessions[i],
         primaryDocument: docs[i],
@@ -107,7 +121,7 @@ async function findFiling(cik: string): Promise<FilingInfo | null> {
 
 // ─── Step 2: Fetch XBRL instance XML ─────────────────────────────────────────
 
-async function fetchXbrlXml(cik: string, filing: FilingInfo): Promise<string> {
+async function fetchXbrlXml(cik: string, period: string, filing: FilingInfo): Promise<string> {
   const numericCik = cik.replace(/^0+/, "");
   const accNodash = filing.accessionNumber.replace(/-/g, "");
   const primaryBase = filing.primaryDocument.replace(/\.(htm|html)$/i, "");
@@ -117,7 +131,7 @@ async function fetchXbrlXml(cik: string, filing: FilingInfo): Promise<string> {
   const xmlName = `${primaryBase}_htm.xml`;
   const url = `https://www.sec.gov/Archives/edgar/data/${numericCik}/${accNodash}/${xmlName}`;
 
-  const cacheKey = `xbrl_${cik}_${PERIOD.replace(/-/g, "")}`;
+  const cacheKey = `xbrl_${cik}_${period.replace(/-/g, "")}`;
   let cached = cacheGet<string>(cacheKey);
   if (cached) return typeof cached === "string" ? cached : JSON.stringify(cached);
 
@@ -335,8 +349,19 @@ function extractMaturity(facts: Record<string, string>, domain: string): string 
 }
 
 /**
+ * Convert YYYY-MM-DD to "Month D, YYYY" form used in non-accrual footnote text.
+ * E.g. "2025-09-30" → "September 30, 2025".
+ */
+function periodToHumanDate(period: string): { human: string; year: string } {
+  const [y, m, d] = period.split("-");
+  const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const monthName = months[parseInt(m, 10) - 1];
+  return { human: `${monthName} ${parseInt(d, 10)}, ${y}`, year: y };
+}
+
+/**
  * Parse ix:footnote arcs from a BDC's iXBRL HTM filing to get the definitive
- * set of XBRL context IDs that are on non-accrual as of 2025-12-31.
+ * set of XBRL context IDs that are on non-accrual as of the target period.
  *
  * Every BDC filer (ARCC, BXSL, OBDC, FSK, ADS, GSCR) uses this pattern:
  *   <ix:footnote id="fn-X">Loan was on non-accrual status as of December 31, 2025.</ix:footnote>
@@ -344,10 +369,14 @@ function extractMaturity(facts: Record<string, string>, domain: string): string 
  * The fromRefs are iXBRL fact IDs whose contextRef attributes point to the
  * InvestmentIdentifierAxis context for that position.
  */
-function extractNonAccrualContextIds(htm: string): Set<string> {
+function extractNonAccrualContextIds(htm: string, period: string): Set<string> {
   const naCtxIds = new Set<string>();
+  const { year: targetYear } = periodToHumanDate(period);
 
-  // 1. Find footnote IDs with non-accrual text (for 2025, not prior year)
+  // 1. Find footnote IDs with non-accrual text relevant to this period.
+  // We accept any footnote that mentions non-accrual AND either (a) names this
+  // period's year, or (b) names no specific year. We exclude footnotes that
+  // explicitly name a different year only.
   const fnRe = /<ix:footnote[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/ix:footnote>/gi;
   const naFnIds: string[] = [];
   let fnMatch: RegExpExecArray | null;
@@ -355,9 +384,12 @@ function extractNonAccrualContextIds(htm: string): Set<string> {
     const [, fnId, rawTxt] = fnMatch;
     const txt = rawTxt.replace(/<[^>]+>/g, " ").trim();
     if (!/non.accrual/i.test(txt)) continue;
-    // Exclude footnotes that are explicitly for a prior year only
-    const year2024 = txt.includes("2024") && !txt.includes("2025");
-    if (year2024) continue;
+
+    // Find all 4-digit years mentioned in the footnote.
+    const yearsInTxt = Array.from(txt.matchAll(/\b(20\d{2})\b/g)).map(m => m[1]);
+    const mentionsTargetYear = yearsInTxt.includes(targetYear);
+    const mentionsOtherYearOnly = yearsInTxt.length > 0 && !mentionsTargetYear;
+    if (mentionsOtherYearOnly) continue;
     naFnIds.push(fnId);
   }
 
@@ -408,10 +440,10 @@ function inferNonAccrual(par: number, fv: number, domain: string): boolean {
 }
 
 /** Parse the XBRL instance XML string into investment records. */
-function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<string> = new Set()): RawInvestment[] {
+function parseXbrlInvestments(xml: string, fundId: string, period: string, naContextIds: Set<string> = new Set()): RawInvestment[] {
   const investments: RawInvestment[] = [];
 
-  // ── 1. Build context id → domain text map for 2025-12-31 ──────────────────
+  // ── 1. Build context id → domain text map for the target period ────────────
   // Strategy: split on </context> (non-nesting) to get each context block.
   // CRITICAL: namespace prefix may be 'us-gaap' (has hyphen) — use [a-zA-Z0-9_-]+
   const contextMap: Record<string, string> = {};
@@ -419,14 +451,14 @@ function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<str
   const contextBlocks = xml.split("</context>");
   for (const block of contextBlocks) {
     if (!block.includes("InvestmentIdentifierAxis")) continue;
-    if (!block.includes("2025-12-31")) continue;
+    if (!block.includes(period)) continue;
 
     const idMatch = block.match(/id="([^"]+)"/);
     if (!idMatch) continue;
     const ctxId = idMatch[1];
 
     const periodMatch = block.match(/<instant>([^<]+)<\/instant>/);
-    if (!periodMatch || periodMatch[1].trim() !== "2025-12-31") continue;
+    if (!periodMatch || periodMatch[1].trim() !== period) continue;
 
     // Domain is child text of <ns:InvestmentIdentifierAxis.domain>
     // ns can be 'us-gaap' (with hyphen) so use [a-zA-Z0-9_-]+
@@ -537,6 +569,7 @@ function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<str
 
 async function parseHtmlFallback(
   cik: string,
+  period: string,
   filing: FilingInfo,
   fundId: string
 ): Promise<RawInvestment[]> {
@@ -544,9 +577,9 @@ async function parseHtmlFallback(
   const accNodash  = filing.accessionNumber.replace(/-/g, "");
   const url = `https://www.sec.gov/Archives/edgar/data/${numericCik}/${accNodash}/${filing.primaryDocument}`;
 
-  console.log(`[edgar] HTML fallback for ${fundId}: ${url}`);
+  console.log(`[edgar] HTML fallback for ${fundId} ${period}: ${url}`);
 
-  const cacheKey = `htm_${cik}_${PERIOD.replace(/-/g, "")}`;
+  const cacheKey = `htm_${cik}_${period.replace(/-/g, "")}`;
   let html = cacheGet<string>(cacheKey);
   if (!html) {
     html = await fetchWithRetry(url);
@@ -636,14 +669,17 @@ async function parseHtmlFallback(
 // ─── Main extraction entry point ─────────────────────────────────────────────
 
 export async function extractFund(
-  fund: FundMeta
+  fund: FundMeta,
+  period: string,
+  formTypes: string[],
 ): Promise<{ investments: RawInvestment[]; status: ExtractionStatus }> {
   const t0 = Date.now();
-  const statusBase = { fund: fund.id, cik: fund.cik, investmentCount: 0, durationMs: 0 };
+  const statusBase = { fund: fund.id, cik: fund.cik, period, investmentCount: 0, durationMs: 0 };
+  const periodTag = period.replace(/-/g, "");
 
   try {
     // Check for already-cached normalized investments
-    const invCacheKey = `investments_${fund.cik}_${PERIOD.replace(/-/g, "")}`;
+    const invCacheKey = `investments_${fund.cik}_${periodTag}`;
     const cached = cacheGet<RawInvestment[]>(invCacheKey);
     if (cached && Array.isArray(cached) && cached.length > 0) {
       return {
@@ -653,15 +689,23 @@ export async function extractFund(
     }
 
     // Step 1: Find the filing
-    console.log(`[edgar] Finding 10-K for ${fund.id} (${fund.cik})...`);
-    const filing = await findFiling(fund.cik);
+    const formLabel = formTypes.join("/");
+    console.log(`[edgar] Finding ${formLabel} for ${fund.id} ${period} (${fund.cik})...`);
+    const filing = await findFiling(fund.cik, period, formTypes);
     if (!filing) {
-      throw new Error(`No 10-K found for period ${PERIOD}`);
+      // Not an error per se — filer may not have filed for this period yet, or
+      // may use a different fiscal calendar. Mark unavailable and move on.
+      console.warn(`[edgar] No ${formLabel} found for ${fund.id} ${period} — marking unavailable`);
+      return {
+        investments: [],
+        status: { ...statusBase, status: "unavailable", durationMs: Date.now() - t0,
+                  error: `No ${formLabel} filing for period ${period}` },
+      };
     }
     console.log(`[edgar] Found filing: ${filing.accessionNumber} | ${filing.primaryDocument}`);
 
     // Step 2: Fetch HTM to extract definitive non-accrual context IDs via ix:footnote
-    const htmCacheKey = `htm_${fund.cik}_${PERIOD.replace(/-/g, "")}`;
+    const htmCacheKey = `htm_${fund.cik}_${periodTag}`;
     let naContextIds = new Set<string>();
     try {
       let htmContent = cacheGet<string>(htmCacheKey);
@@ -669,34 +713,34 @@ export async function extractFund(
         const numericCik = fund.cik.replace(/^0+/, "");
         const accNodash  = filing.accessionNumber.replace(/-/g, "");
         const htmUrl = `https://www.sec.gov/Archives/edgar/data/${numericCik}/${accNodash}/${filing.primaryDocument}`;
-        console.log(`[edgar] Fetching HTM for ${fund.id} non-accrual detection...`);
+        console.log(`[edgar] Fetching HTM for ${fund.id} ${period} non-accrual detection...`);
         htmContent = await fetchWithRetry(htmUrl);
         cacheSet(htmCacheKey, htmContent);
       } else {
-        console.log(`[edgar] HTM cache hit for ${fund.id}`);
+        console.log(`[edgar] HTM cache hit for ${fund.id} ${period}`);
       }
-      naContextIds = extractNonAccrualContextIds(htmContent as string);
-      console.log(`[edgar] Non-accrual context IDs for ${fund.id}: ${naContextIds.size}`);
+      naContextIds = extractNonAccrualContextIds(htmContent as string, period);
+      console.log(`[edgar] Non-accrual context IDs for ${fund.id} ${period}: ${naContextIds.size}`);
     } catch (htmErr) {
-      console.warn(`[edgar] HTM non-accrual extraction failed for ${fund.id}:`, htmErr);
+      console.warn(`[edgar] HTM non-accrual extraction failed for ${fund.id} ${period}:`, htmErr);
     }
 
     // Step 3: Fetch and parse XBRL instance, passing NA context IDs
     let investments: RawInvestment[] = [];
     try {
-      console.log(`[edgar] Fetching XBRL instance for ${fund.id}...`);
-      const xml = await fetchXbrlXml(fund.cik, filing);
-      investments = parseXbrlInvestments(xml, fund.id, naContextIds);
-      console.log(`[edgar] XBRL parsed: ${investments.length} investments for ${fund.id}`);
+      console.log(`[edgar] Fetching XBRL instance for ${fund.id} ${period}...`);
+      const xml = await fetchXbrlXml(fund.cik, period, filing);
+      investments = parseXbrlInvestments(xml, fund.id, period, naContextIds);
+      console.log(`[edgar] XBRL parsed: ${investments.length} investments for ${fund.id} ${period}`);
     } catch (xmlErr) {
-      console.warn(`[edgar] XBRL parse failed for ${fund.id}:`, xmlErr);
+      console.warn(`[edgar] XBRL parse failed for ${fund.id} ${period}:`, xmlErr);
     }
 
     // Step 4: HTML fallback if needed
     if (investments.length < 5) {
-      console.log(`[edgar] Using HTML fallback for ${fund.id} (XBRL yielded ${investments.length})`);
-      investments = await parseHtmlFallback(fund.cik, filing, fund.id);
-      console.log(`[edgar] HTML fallback: ${investments.length} investments for ${fund.id}`);
+      console.log(`[edgar] Using HTML fallback for ${fund.id} ${period} (XBRL yielded ${investments.length})`);
+      investments = await parseHtmlFallback(fund.cik, period, filing, fund.id);
+      console.log(`[edgar] HTML fallback: ${investments.length} investments for ${fund.id} ${period}`);
     }
 
     // Cache the parsed investments
@@ -713,7 +757,7 @@ export async function extractFund(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[edgar] ERROR for ${fund.id}:`, msg);
+    console.error(`[edgar] ERROR for ${fund.id} ${period}:`, msg);
     return {
       investments: [],
       status: { ...statusBase, status: "error", durationMs: Date.now() - t0, error: msg },
@@ -721,33 +765,58 @@ export async function extractFund(
   }
 }
 
-/** Extract all 7 funds in parallel with per-fund error isolation. */
-export async function extractAllFunds(): Promise<{
+/** Extract all funds for a single period, with per-fund error isolation. */
+export async function extractAllFunds(
+  period: string = LATEST_PERIOD,
+  formTypes: string[] = ["10-K"],
+): Promise<{
   allInvestments: RawInvestment[];
   statuses: ExtractionStatus[];
 }> {
-  console.log(`[edgar] Starting extraction for ${FUNDS.length} funds...`);
+  console.log(`[edgar] Extracting ${FUNDS.length} funds for period ${period} (${formTypes.join("/")})...`);
 
   // Rate-limit: extract in batches of 3 (EDGAR rate limit ~10 req/s)
   const results: Array<{ investments: RawInvestment[]; status: ExtractionStatus }> = [];
 
   for (let i = 0; i < FUNDS.length; i += 3) {
     const batch = FUNDS.slice(i, i + 3);
-    const batchResults = await Promise.all(batch.map(extractFund));
+    const batchResults = await Promise.all(batch.map(f => extractFund(f, period, formTypes)));
     results.push(...batchResults);
     if (i + 3 < FUNDS.length) {
-      await new Promise(r => setTimeout(r, 500)); // brief pause between batches
+      await new Promise(r => setTimeout(r, 500));
     }
   }
 
   const allInvestments = results.flatMap(r => r.investments);
   const statuses = results.map(r => r.status);
 
-  console.log(`[edgar] Extraction complete. Total investments: ${allInvestments.length}`);
+  console.log(`[edgar] Period ${period} done. Total investments: ${allInvestments.length}`);
   statuses.forEach(s => {
-    const icon = s.status === "ok" ? "✓" : s.status === "cached" ? "⚡" : "✗";
-    console.log(`  ${icon} ${s.fund}: ${s.investmentCount} investments (${s.durationMs}ms)${s.error ? " ERR: " + s.error : ""}`);
+    const icon = s.status === "ok" ? "✓" :
+                 s.status === "cached" ? "⚡" :
+                 s.status === "unavailable" ? "—" : "✗";
+    console.log(`  ${icon} ${s.fund}: ${s.investmentCount} investments (${s.durationMs}ms)${s.error ? " — " + s.error : ""}`);
   });
 
   return { allInvestments, statuses };
+}
+
+/**
+ * Multi-period driver: extract every (fund, period) combination defined in
+ * PERIODS. Returns a map keyed by period → single-period extraction result.
+ * Per-(fund, period) failures (including missing filings) are non-fatal.
+ */
+export async function extractAllFundsAllPeriods(): Promise<{
+  byPeriod: Record<string, { allInvestments: RawInvestment[]; statuses: ExtractionStatus[] }>;
+  allStatuses: ExtractionStatus[];
+}> {
+  const byPeriod: Record<string, { allInvestments: RawInvestment[]; statuses: ExtractionStatus[] }> = {};
+  const allStatuses: ExtractionStatus[] = [];
+
+  for (const cfg of PERIODS) {
+    const result = await extractAllFunds(cfg.period, cfg.formTypes);
+    byPeriod[cfg.period] = result;
+    allStatuses.push(...result.statuses);
+  }
+  return { byPeriod, allStatuses };
 }

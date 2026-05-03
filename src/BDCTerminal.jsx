@@ -4,6 +4,7 @@ import { TopBar, FundStrip, TabBar } from "./terminal/Shell.jsx";
 import { OverviewTab } from "./terminal/Overview.jsx";
 import { HeatmapTab, BorrowerGraphTab, SOITab, StressTab } from "./terminal/OtherTabs.jsx";
 import { GSLensTab } from "./terminal/GSLens.jsx";
+import { SignalsTab } from "./terminal/SignalsTab.jsx";
 import { GLOBAL_CSS } from "./terminal/globalStyles.js";
 
 const THEME = THEMES.glass;
@@ -81,6 +82,7 @@ export default function BDCTerminal({ data, prevData }) {
         {activeTab === "soi" && <SOITab {...tabProps} />}
         {activeTab === "stress" && <StressTab {...tabProps} />}
         {activeTab === "gslens" && <GSLensTab {...tabProps} />}
+        {activeTab === "signals" && <SignalsTab {...tabProps} />}
       </div>
     </div>
   );
