@@ -15,7 +15,7 @@
 
 import { extractAllFunds } from "../server/edgar.js";
 import { normalizeData } from "../server/normalize.js";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, existsSync, copyFileSync } from "fs";
 import path from "path";
 
 async function main() {
@@ -53,7 +53,15 @@ async function main() {
   };
 
   const outPath = path.resolve(process.cwd(), "public/data/bdc-data.json");
+  const prevPath = path.resolve(process.cwd(), "public/data/bdc-data.prev.json");
   mkdirSync(path.dirname(outPath), { recursive: true });
+
+  // Snapshot the existing dataset to *.prev.json so the UI can diff vs. last refresh.
+  if (existsSync(outPath)) {
+    copyFileSync(outPath, prevPath);
+    console.log(`  Previous snapshot → public/data/bdc-data.prev.json`);
+  }
+
   writeFileSync(outPath, JSON.stringify(output, null, 2), "utf-8");
 
   const sizeMB = (Buffer.byteLength(JSON.stringify(output)) / 1024 / 1024).toFixed(2);

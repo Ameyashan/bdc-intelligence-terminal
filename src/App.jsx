@@ -3,8 +3,8 @@ import BDCTerminal from "./BDCTerminal.jsx";
 
 export default function App() {
   const [data, setData] = useState(null);
+  const [prevData, setPrevData] = useState(null);
   const [error, setError] = useState(null);
-  const [loadMsg, setLoadMsg] = useState("Connecting to EDGAR...");
 
   useEffect(() => {
     let cancelled = false;
@@ -12,13 +12,11 @@ export default function App() {
     async function load(refresh = false) {
       setError(null);
       try {
-        // On Vercel (and local), serve the pre-built static JSON from /data/bdc-data.json
-        // For the local dev proxy, use the live API endpoint instead
         const base = window.location.href.replace(/\/$/, '');
         const isProxy = base.includes('/port/');
         const url = isProxy
-          ? `${base}/api/bdc-data${refresh ? "?refresh=1" : ""}` // local proxy: live API
-          : `${window.location.origin}/data/bdc-data.json`;       // Vercel/prod: static file
+          ? `${base}/api/bdc-data${refresh ? "?refresh=1" : ""}`
+          : `${window.location.origin}/data/bdc-data.json`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
@@ -29,7 +27,20 @@ export default function App() {
       }
     }
 
+    async function loadPrev() {
+      try {
+        const url = `${window.location.origin}/data/bdc-data.prev.json`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled && json && !json.error) setPrevData(json);
+      } catch {
+        // No prev snapshot → first refresh after wiring; deltas panel just won't render.
+      }
+    }
+
     load();
+    loadPrev();
     return () => { cancelled = true; };
   }, []);
 
@@ -56,5 +67,5 @@ export default function App() {
   }
 
   // BDCTerminal shows its own loading skeleton when data is null
-  return <BDCTerminal data={data} />;
+  return <BDCTerminal data={data} prevData={prevData} />;
 }
