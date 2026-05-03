@@ -1,7 +1,35 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { riskColor, ratioToRiskT, fmtM, shortCompany } from "./designTokens.js";
 import { Panel, SectionHeader } from "./Overview.jsx";
 import { computeAllSignals } from "./signals.js";
+
+/** Click-to-sort header cell. */
+function Th({ label, sortKey, currentKey, currentDir, onSort, theme, align = "left" }) {
+  const isActive = currentKey === sortKey;
+  const arrow = isActive ? (currentDir === "desc" ? "▼" : "▲") : "";
+  return (
+    <div
+      onClick={() => onSort(sortKey)}
+      style={{
+        cursor: "pointer", userSelect: "none",
+        textAlign: align,
+        color: isActive ? theme.text : theme.textDim,
+        transition: "color 120ms",
+      }}
+      title={`Sort by ${label}`}
+    >
+      {label}
+      {arrow && <span style={{ marginLeft: 4, color: theme.accent }}>{arrow}</span>}
+    </div>
+  );
+}
+
+/** Default sort key + direction per detector. */
+const DEFAULT_SORT = {
+  markDrift:  { key: "drop",      dir: "desc" },
+  pikCreep:   { key: "pikDelta",  dir: "desc" },
+  divergence: { key: "growth",    dir: "desc" },
+};
 
 /**
  * Sparkline of FV/Par across the period series. Series is ordered LATEST first,
@@ -82,6 +110,25 @@ function FundBadge({ id, theme }) {
 export function SignalsTab({ investments, theme, motion, drillToSOI }) {
   const [activeDetector, setActiveDetector] = useState("markDrift");
   const [topN, setTopN] = useState(20);
+  const [sortKey, setSortKey] = useState(DEFAULT_SORT.markDrift.key);
+  const [sortDir, setSortDir] = useState(DEFAULT_SORT.markDrift.dir);
+
+  // Reset sort + paging when switching detectors so each tab opens with its
+  // most informative default ordering.
+  useEffect(() => {
+    setSortKey(DEFAULT_SORT[activeDetector].key);
+    setSortDir(DEFAULT_SORT[activeDetector].dir);
+    setTopN(20);
+  }, [activeDetector]);
+
+  function handleSort(key) {
+    if (sortKey === key) {
+      setSortDir(d => d === "desc" ? "asc" : "desc");
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  }
 
   const signals = useMemo(() => computeAllSignals(investments), [investments]);
 
@@ -104,6 +151,23 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
   };
 
   const active = detectorMeta[activeDetector];
+
+  const sortedHits = useMemo(() => {
+    const hits = [...active.hits];
+    hits.sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      let cmp;
+      if (typeof va === "string" && typeof vb === "string") {
+        cmp = va.localeCompare(vb);
+      } else if (typeof va === "boolean" || typeof vb === "boolean") {
+        cmp = (va ? 1 : 0) - (vb ? 1 : 0);
+      } else {
+        cmp = (va ?? 0) - (vb ?? 0);
+      }
+      return sortDir === "desc" ? -cmp : cmp;
+    });
+    return hits;
+  }, [active.hits, sortKey, sortDir]);
 
   return (
     <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 18 }}>
@@ -139,52 +203,52 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
       </div>
 
       {/* Active detector ranked list */}
-      <SignalCard title={`${active.title} — top ${Math.min(topN, active.hits.length)} of ${active.hits.length}`} hits={active.hits.length} theme={theme} accent={theme.accent}>
-        {active.hits.length === 0 && (
+      <SignalCard title={`${active.title} — top ${Math.min(topN, sortedHits.length)} of ${sortedHits.length}`} hits={sortedHits.length} theme={theme} accent={theme.accent}>
+        {sortedHits.length === 0 && (
           <div style={{ padding: "24px 16px", color: theme.textDim, fontSize: 12 }}>
             No hits at current thresholds. Try lowering them in the controls (coming soon).
           </div>
         )}
 
-        {/* Header row */}
-        {active.hits.length > 0 && activeDetector === "markDrift" && (
+        {/* Header row (sortable) */}
+        {sortedHits.length > 0 && activeDetector === "markDrift" && (
           <SignalRow theme={theme}>
-            <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 120px 90px 80px 60px", alignItems: "center", gap: 10, fontSize: 10, color: theme.textDim, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
-              <div>FUND</div>
-              <div>BORROWER</div>
-              <div>INDUSTRY</div>
-              <div>FV/PAR DROP</div>
-              <div style={{ textAlign: "right" }}>PAR</div>
-              <div>STATUS</div>
-              <div>TREND</div>
+            <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 120px 90px 80px 60px", alignItems: "center", gap: 10, fontSize: 10, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
+              <Th label="FUND"        sortKey="fund"            currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="BORROWER"    sortKey="company"         currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="INDUSTRY"    sortKey="industry"        currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="FV/PAR DROP" sortKey="drop"            currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="PAR"         sortKey="par"             currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} align="right" />
+              <Th label="STATUS"      sortKey="stillPerforming" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <div style={{ color: theme.textDim }}>FV/PAR</div>
             </div>
           </SignalRow>
         )}
-        {active.hits.length > 0 && activeDetector === "pikCreep" && (
+        {sortedHits.length > 0 && activeDetector === "pikCreep" && (
           <SignalRow theme={theme}>
-            <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 140px 90px 60px", alignItems: "center", gap: 10, fontSize: 10, color: theme.textDim, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
-              <div>FUND</div>
-              <div>BORROWER</div>
-              <div>INDUSTRY</div>
-              <div>PIK% TRAJECTORY</div>
-              <div style={{ textAlign: "right" }}>PAR</div>
-              <div>TREND</div>
+            <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 140px 90px 60px", alignItems: "center", gap: 10, fontSize: 10, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
+              <Th label="FUND"             sortKey="fund"      currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="BORROWER"         sortKey="company"   currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="INDUSTRY"         sortKey="industry"  currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="PIK% TRAJECTORY"  sortKey="pikDelta"  currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="PAR"              sortKey="par"       currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} align="right" />
+              <div style={{ color: theme.textDim }}>FV/PAR</div>
             </div>
           </SignalRow>
         )}
-        {active.hits.length > 0 && activeDetector === "divergence" && (
+        {sortedHits.length > 0 && activeDetector === "divergence" && (
           <SignalRow theme={theme}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 60px 130px 90px", alignItems: "center", gap: 10, fontSize: 10, color: theme.textDim, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
-              <div>BORROWER</div>
-              <div>INDUSTRY</div>
-              <div>FUNDS</div>
-              <div>STD-DEV GROWTH</div>
-              <div style={{ textAlign: "right" }}>TOTAL PAR</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 60px 130px 90px", alignItems: "center", gap: 10, fontSize: 10, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" }}>
+              <Th label="BORROWER"        sortKey="borrower"  currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="INDUSTRY"        sortKey="industry"  currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="FUNDS"           sortKey="fundCount" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="STD-DEV GROWTH"  sortKey="growth"    currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} />
+              <Th label="TOTAL PAR"       sortKey="totalPar"  currentKey={sortKey} currentDir={sortDir} onSort={handleSort} theme={theme} align="right" />
             </div>
           </SignalRow>
         )}
 
-        {active.hits.slice(0, topN).map((h, i) => {
+        {sortedHits.slice(0, topN).map((h, i) => {
           if (activeDetector === "markDrift") {
             return (
               <SignalRow key={i} theme={theme}>
@@ -203,8 +267,9 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
                     <span style={{ color: riskColor(0.7), marginLeft: 6 }}>−{(h.drop * 100).toFixed(1)}pt</span>
                   </div>
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, textAlign: "right" }}>{fmtM(h.par)}</div>
-                  <div style={{ fontSize: 10, color: h.stillPerforming ? theme.accent : riskColor(1), fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}>
-                    {h.stillPerforming ? "PERF" : "NA"}
+                  <div style={{ fontSize: 10, color: h.stillPerforming ? theme.accent : riskColor(1), fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}
+                       title={h.stillPerforming ? "Still performing — lender hasn't moved to non-accrual" : "Non-accrual — lender has stopped recognizing interest income"}>
+                    {h.stillPerforming ? "PERF" : "NON-ACCR"}
                   </div>
                   <FvParSparkline series={h.series} theme={theme} width={56} height={20} />
                 </div>
@@ -229,7 +294,9 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
                     <span style={{ color: riskColor(0.5), marginLeft: 6 }}>+{h.pikDelta.toFixed(1)}pp</span>
                   </div>
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, textAlign: "right" }}>{fmtM(h.par)}</div>
-                  <FvParSparkline series={h.series} theme={theme} width={56} height={20} />
+                  <span title="FV/Par mark trajectory across the 3 periods. PIK can rise while mark falls — that combination is the strongest pre-distress signal.">
+                    <FvParSparkline series={h.series} theme={theme} width={56} height={20} />
+                  </span>
                 </div>
               </SignalRow>
             );
@@ -259,7 +326,7 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
           );
         })}
 
-        {active.hits.length > topN && (
+        {sortedHits.length > topN && (
           <div style={{ padding: "12px 16px", borderTop: `1px solid ${theme.borderSoft}`, textAlign: "center" }}>
             <button onClick={() => setTopN(n => n + 20)}
               style={{

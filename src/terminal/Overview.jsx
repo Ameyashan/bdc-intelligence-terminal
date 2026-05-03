@@ -757,6 +757,10 @@ function WhatChangedPanel({ current, prev, theme, motion, selectedFunds, gsHighl
 
   const deltas = useMemo(() => computeDeltas(filtered.c, filtered.p), [filtered]);
   const fundDeltas = useMemo(() => fundFvDeltas(filtered.c, filtered.p) || [], [filtered]);
+  const meaningfulFundDeltas = useMemo(() => fundDeltas.filter(d =>
+    !d.isNew && selectedFunds.has(d.id) &&
+    (Math.abs(d.dFv) >= 0.05 || Math.abs(d.dRatio) >= 0.01 || d.dNonAccr !== 0)
+  ), [fundDeltas, selectedFunds]);
 
   if (!deltas) return null;
 
@@ -772,12 +776,12 @@ function WhatChangedPanel({ current, prev, theme, motion, selectedFunds, gsHighl
 
   return (
     <Panel theme={theme} title="What changed" subtitle={periodLabel}>
-      {fundDeltas.length > 0 && (
+      {meaningfulFundDeltas.length > 0 && (
         <div style={{
           display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
           gap: 8, marginBottom: 16,
         }}>
-          {fundDeltas.filter(d => !d.isNew && selectedFunds.has(d.id)).map(d => {
+          {meaningfulFundDeltas.map(d => {
             const c = d.dFv >= 0 ? riskColor(0.05) : riskColor(0.85);
             return (
               <div key={d.id} style={{
