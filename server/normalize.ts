@@ -423,14 +423,10 @@ export function normalizeData(rawInvestments: RawInvestment[]): TerminalData {
     };
   });
 
-  // ── 7. Re-classify nonAccrual ─────────────────────────────────────────────
-  const finalInvestments: RawInvestment[] = deduped.map(inv => {
-    const fvParRatio = inv.par > 0 ? inv.fv / inv.par : 1;
-    return {
-      ...inv,
-      nonAccrual: inv.nonAccrual || (inv.par > 0 && fvParRatio < 0.50),
-    };
-  });
+  // ── 7. Pass through nonAccrual as set by the extraction pipeline ───────────
+  // Non-accrual is now set authoritatively via ix:footnote lookup in edgar.ts.
+  // No secondary heuristic here — trust the source.
+  const finalInvestments: RawInvestment[] = deduped;
 
   return { funds, investments: finalInvestments };
 }

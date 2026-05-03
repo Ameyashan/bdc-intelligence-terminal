@@ -144,6 +144,7 @@ export const TABS = [
   { id: "graph",     label: "Borrower Graph" },
   { id: "soi",       label: "Schedule of Investments" },
   { id: "stress",    label: "Stress Register" },
+  { id: "gslens",    label: "GS Lens", accent: true },
 ];
 
 export function TabBar({ theme, active, onChange }) {
@@ -156,6 +157,10 @@ export function TabBar({ theme, active, onChange }) {
     }}>
       {TABS.map((tab, i) => {
         const isActive = active === tab.id;
+        const labelColor = tab.accent
+          ? (isActive ? theme.accent : `color-mix(in oklch, ${theme.accent} 70%, ${theme.textDim})`)
+          : (isActive ? theme.text : theme.textDim);
+        const underline = tab.accent ? theme.accent : theme.text;
         return (
           <div
             key={tab.id}
@@ -165,8 +170,8 @@ export function TabBar({ theme, active, onChange }) {
               fontSize: 12,
               fontWeight: isActive ? 600 : 400,
               padding: "12px 16px",
-              color: isActive ? theme.text : theme.textDim,
-              borderBottom: isActive ? `1.5px solid ${theme.text}` : "1.5px solid transparent",
+              color: labelColor,
+              borderBottom: isActive ? `1.5px solid ${underline}` : "1.5px solid transparent",
               cursor: "pointer",
               letterSpacing: -0.1,
               transition: "color 150ms",
@@ -177,6 +182,7 @@ export function TabBar({ theme, active, onChange }) {
               0{i + 1}
             </span>
             {tab.label}
+            {tab.accent && <span style={{ color: theme.accent, marginLeft: 2 }}>⚡</span>}
           </div>
         );
       })}

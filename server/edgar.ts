@@ -260,6 +260,35 @@ function parseDomain(rawDomain: string): { company: string; industry: string; in
   return { company, industry, investmentType: extractInvestmentType(domain) };
 }
 
+// ─── FX rates (CCY → USD) as of Dec 31 2025 — ECB official reference rates ──────────
+// USD/EUR = 1.1750; CCY_to_USD = USD_per_EUR / CCY_per_EUR
+// Source: https://data-api.ecb.europa.eu/service/data/EXR/D.*.EUR.SP00.A?startPeriod=2025-12-31
+const FX_TO_USD: Record<string, number> = {
+  U_USD: 1.000000,
+  U_EUR: 1.175000,
+  U_GBP: 1.346551,
+  U_CAD: 0.730358,
+  U_AUD: 0.668335,
+  U_CHF: 1.261542,
+  U_SEK: 0.108580,
+  U_NOK: 0.099215,
+  U_DKK: 0.157319,
+  U_JPY: 0.006383,
+  U_KRW: 0.000692,
+  // lowercase aliases (some filers use lowercase unitRef)
+  usd:   1.000000,
+  eur:   1.175000,
+  gbp:   1.346551,
+  cad:   0.730358,
+  aud:   0.668335,
+  chf:   1.261542,
+  sek:   0.108580,
+  nok:   0.099215,
+  dkk:   0.157319,
+  jpy:   0.006383,
+  krw:   0.000692,
+};
+
 // ─── Rate and maturity builders ───────────────────────────────────────────────
 
 function safeNum(v: string | null | undefined): number {
@@ -305,14 +334,81 @@ function extractMaturity(facts: Record<string, string>, domain: string): string 
   return "—";
 }
 
+/**
+ * Parse ix:footnote arcs from a BDC's iXBRL HTM filing to get the definitive
+ * set of XBRL context IDs that are on non-accrual as of 2025-12-31.
+ *
+ * Every BDC filer (ARCC, BXSL, OBDC, FSK, ADS, GSCR) uses this pattern:
+ *   <ix:footnote id="fn-X">Loan was on non-accrual status as of December 31, 2025.</ix:footnote>
+ *   <ix:relationship fromRefs="f-111 f-222" toRefs="fn-X" />
+ * The fromRefs are iXBRL fact IDs whose contextRef attributes point to the
+ * InvestmentIdentifierAxis context for that position.
+ */
+function extractNonAccrualContextIds(htm: string): Set<string> {
+  const naCtxIds = new Set<string>();
+
+  // 1. Find footnote IDs with non-accrual text (for 2025, not prior year)
+  const fnRe = /<ix:footnote[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/ix:footnote>/gi;
+  const naFnIds: string[] = [];
+  let fnMatch: RegExpExecArray | null;
+  while ((fnMatch = fnRe.exec(htm)) !== null) {
+    const [, fnId, rawTxt] = fnMatch;
+    const txt = rawTxt.replace(/<[^>]+>/g, " ").trim();
+    if (!/non.accrual/i.test(txt)) continue;
+    // Exclude footnotes that are explicitly for a prior year only
+    const year2024 = txt.includes("2024") && !txt.includes("2025");
+    if (year2024) continue;
+    naFnIds.push(fnId);
+  }
+
+  if (naFnIds.length === 0) return naCtxIds;
+
+  // 2. Find ix:relationship arcs that link facts to these footnotes
+  for (const fnId of naFnIds) {
+    // Two possible attribute orderings
+    const patterns = [
+      new RegExp(`fromRefs="([^"]+)"[^>]*toRefs="[^"]*\\b${fnId}\\b`),
+      new RegExp(`toRefs="[^"]*\\b${fnId}\\b[^"]*"[^>]*fromRefs="([^"]+)"`),
+    ];
+    for (const pat of patterns) {
+      const relM = pat.exec(htm);
+      if (!relM) continue;
+      // Group 1 will be fromRefs for pattern 1, but toRefs for pattern 2 — pick the one without fnId
+      const g1 = relM[1];
+      // For pattern 2 there may be a second group
+      const factIdsStr = g1.includes(fnId) ? (relM[2] ?? "") : g1;
+      for (const factId of factIdsStr.trim().split(/\s+/)) {
+        if (!factId) continue;
+        // Resolve fact ID → contextRef
+        const idx = htm.indexOf(`id="${factId}"`);
+        if (idx < 0) continue;
+        const tagStart = htm.lastIndexOf("<", idx);
+        const tagEnd   = htm.indexOf(">", idx);
+        const tag      = htm.slice(tagStart, tagEnd + 1);
+        const ctxM     = /contextRef="([^"]+)"/.exec(tag);
+        if (ctxM) naCtxIds.add(ctxM[1]);
+      }
+      break;
+    }
+  }
+
+  return naCtxIds;
+}
+
+/**
+ * Fallback heuristic: only flag non-accrual when domain text explicitly says so,
+ * OR the position is very deeply distressed (FV < 5% of par AND fv > 0).
+ * The old 50% threshold was wrong — it caught unfunded revolvers (par > 0, fv ≈ 0).
+ */
 function inferNonAccrual(par: number, fv: number, domain: string): boolean {
-  if (/non-accrual|non\s+accrual/i.test(domain)) return true;
-  if (par > 0 && fv >= 0 && fv / par < 0.50) return true;
+  if (/non.accrual/i.test(domain)) return true;
+  // Deep distress ONLY — not unfunded commitments (those have near-zero FV)
+  if (par > 0.5 && fv > 0.5 && fv / par < 0.05) return true;
   return false;
 }
 
 /** Parse the XBRL instance XML string into investment records. */
-function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
+function parseXbrlInvestments(xml: string, fundId: string, naContextIds: Set<string> = new Set()): RawInvestment[] {
   const investments: RawInvestment[] = [];
 
   // ── 1. Build context id → domain text map for 2025-12-31 ──────────────────
@@ -363,10 +459,10 @@ function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
   ];
 
   const factsByCtx: Record<string, Record<string, string>> = {};
+  // Also track par unitRef per context for FX conversion
+  const parUnitRef: Record<string, string> = {};
 
   for (const tag of TARGET_TAGS) {
-    // [a-zA-Z0-9_-]+ matches namespaces including 'us-gaap'
-    // ([^>]*) captures all attrs (newlines included since [^>] != [^\n])
     const pattern = new RegExp(
       `<[a-zA-Z0-9_-]*:${tag}([^>]*)>([^<]*)`,
       "g"
@@ -381,6 +477,11 @@ function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
       if (!(ctxRef in contextMap)) continue;
       if (!factsByCtx[ctxRef]) factsByCtx[ctxRef] = {};
       factsByCtx[ctxRef][tag] = value;
+      // Capture unitRef for par (needed for FX conversion)
+      if (tag === "InvestmentOwnedBalancePrincipalAmount") {
+        const unitM = attrs.match(/unitRef="([^"]+)"/);
+        if (unitM) parUnitRef[ctxRef] = unitM[1];
+      }
     }
   }
 
@@ -388,14 +489,23 @@ function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
   for (const [ctxId, domain] of Object.entries(contextMap)) {
     const f = factsByCtx[ctxId] ?? {};
 
-    const par  = safeNum(f["InvestmentOwnedBalancePrincipalAmount"]) / 1e6;
-    const cost = safeNum(f["InvestmentOwnedAtCost"]) / 1e6;
-    const fv   = safeNum(f["InvestmentOwnedAtFairValue"] ?? f["InvestmentOwnedFairValueBalance"]) / 1e6;
+    // Convert par to USD using ECB Dec 31 2025 FX rates
+    const parRaw  = safeNum(f["InvestmentOwnedBalancePrincipalAmount"]);
+    const parUnit = parUnitRef[ctxId] ?? "U_USD";
+    const fxRate  = FX_TO_USD[parUnit] ?? 1.0;
+    const par  = (parRaw * fxRate) / 1e6;
+    const cost = safeNum(f["InvestmentOwnedAtCost"]) / 1e6;       // always USD
+    const fv   = safeNum(f["InvestmentOwnedAtFairValue"] ?? f["InvestmentOwnedFairValueBalance"]) / 1e6;  // always USD
 
-    // Skip equity/warrant positions with 0 par (shares-based) that have negligible FV
-    // But keep equity positions that have meaningful FV
-    if (par === 0 && cost === 0 && fv === 0) continue;
-    if (par === 0 && fv === 0 && cost === 0) continue;
+    // Skip positions with no value at all
+    if (parRaw === 0 && cost === 0 && fv === 0) continue;
+
+    // Skip unfunded commitments: these are revolvers/delayed-draw TLs that
+    // haven't been drawn. They have a par commitment but FV ≈ 0 or slightly
+    // negative (marked as a small liability). They are NOT stressed positions.
+    // Threshold: FV < 1% of par AND |fv| < $2M (tiny liability or unfunded)
+    if (par > 0.5 && fv <= 0) continue;          // negative FV = unfunded liability
+    if (par > 0.5 && fv > 0 && fv / par < 0.01 && fv < 2) continue;  // near-zero = unfunded
 
     // Skip money market / cash entries
     if (/money\s+market|cash\s+equivalent/i.test(domain)) continue;
@@ -403,7 +513,8 @@ function parseXbrlInvestments(xml: string, fundId: string): RawInvestment[] {
     const { company, industry, investmentType: invType } = parseDomain(domain);
     const rate     = buildRate(f, domain);
     const maturity = extractMaturity(f, domain);
-    const nonAccrual = inferNonAccrual(par, fv, domain);
+    // Use ix:footnote-derived set first (authoritative), then fallback heuristic
+    const nonAccrual = naContextIds.has(ctxId) || inferNonAccrual(par, fv, domain);
 
     investments.push({
       fund: fundId,
@@ -549,12 +660,33 @@ export async function extractFund(
     }
     console.log(`[edgar] Found filing: ${filing.accessionNumber} | ${filing.primaryDocument}`);
 
-    // Step 2+3: Fetch and parse XBRL instance
+    // Step 2: Fetch HTM to extract definitive non-accrual context IDs via ix:footnote
+    const htmCacheKey = `htm_${fund.cik}_${PERIOD.replace(/-/g, "")}`;
+    let naContextIds = new Set<string>();
+    try {
+      let htmContent = cacheGet<string>(htmCacheKey);
+      if (!htmContent) {
+        const numericCik = fund.cik.replace(/^0+/, "");
+        const accNodash  = filing.accessionNumber.replace(/-/g, "");
+        const htmUrl = `https://www.sec.gov/Archives/edgar/data/${numericCik}/${accNodash}/${filing.primaryDocument}`;
+        console.log(`[edgar] Fetching HTM for ${fund.id} non-accrual detection...`);
+        htmContent = await fetchWithRetry(htmUrl);
+        cacheSet(htmCacheKey, htmContent);
+      } else {
+        console.log(`[edgar] HTM cache hit for ${fund.id}`);
+      }
+      naContextIds = extractNonAccrualContextIds(htmContent as string);
+      console.log(`[edgar] Non-accrual context IDs for ${fund.id}: ${naContextIds.size}`);
+    } catch (htmErr) {
+      console.warn(`[edgar] HTM non-accrual extraction failed for ${fund.id}:`, htmErr);
+    }
+
+    // Step 3: Fetch and parse XBRL instance, passing NA context IDs
     let investments: RawInvestment[] = [];
     try {
       console.log(`[edgar] Fetching XBRL instance for ${fund.id}...`);
       const xml = await fetchXbrlXml(fund.cik, filing);
-      investments = parseXbrlInvestments(xml, fund.id);
+      investments = parseXbrlInvestments(xml, fund.id, naContextIds);
       console.log(`[edgar] XBRL parsed: ${investments.length} investments for ${fund.id}`);
     } catch (xmlErr) {
       console.warn(`[edgar] XBRL parse failed for ${fund.id}:`, xmlErr);

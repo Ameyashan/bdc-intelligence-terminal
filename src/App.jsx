@@ -12,11 +12,11 @@ export default function App() {
     async function load(refresh = false) {
       setError(null);
       try {
-        const base = window.location.href.replace(/\/$/, '');
-        const isProxy = base.includes('/port/');
-        const url = isProxy
-          ? `${base}/api/bdc-data${refresh ? "?refresh=1" : ""}`
-          : `${window.location.origin}/data/bdc-data.json`;
+        const href = window.location.href;
+        const isLocalProxy = href.includes('/port/');
+        const url = isLocalProxy
+          ? `${href.replace(/\/$/, '')}/api/bdc-data${refresh ? "?refresh=1" : ""}`
+          : './data/bdc-data.json';
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
@@ -29,13 +29,12 @@ export default function App() {
 
     async function loadPrev() {
       try {
-        const url = `${window.location.origin}/data/bdc-data.prev.json`;
-        const res = await fetch(url);
+        const res = await fetch('./data/bdc-data.prev.json');
         if (!res.ok) return;
         const json = await res.json();
         if (!cancelled && json && !json.error) setPrevData(json);
       } catch {
-        // No prev snapshot → first refresh after wiring; deltas panel just won't render.
+        // No prev snapshot → deltas panel just won't render.
       }
     }
 
