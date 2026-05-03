@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import {
   riskColor, ratioToRiskT, statusFromRatio, fvParPct, GS_FUNDS,
   fmtM, fmtMShort, fmtSigned, shortCompany,
@@ -6,7 +6,7 @@ import {
 import { parseRate } from "./analytics.js";
 import { Panel, SectionHeader, AnimatedValue } from "./Overview.jsx";
 
-export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, gsHighlight }) {
+export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, gsHighlight, drillToSOI }) {
   const [hover, setHover] = useState(null);
 
   const data = useMemo(() => {
@@ -39,7 +39,7 @@ export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, g
 
   return (
     <div style={{ padding: "24px 32px" }}>
-      <SectionHeader theme={theme} title="Risk heatmap" subtitle="Funds × industries · cell color = stress concentration · cell size = exposure" />
+      <SectionHeader theme={theme} title="Risk heatmap" subtitle="Funds × industries · cell color = stress · cell size = exposure · click any cell to drill into SOI" />
       <Panel theme={theme} padding={20}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ borderCollapse: "separate", borderSpacing: 3, fontFamily: "'Inter Tight', sans-serif" }}>
@@ -88,6 +88,7 @@ export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, g
                           <div
                             onMouseEnter={() => setHover(key)}
                             onMouseLeave={() => setHover(null)}
+                            onClick={() => c.fv > 0 && drillToSOI && drillToSOI({ fund: fid, industry: ind })}
                             style={{
                               height: 44, width: "100%", minWidth: 64,
                               background: c.fv > 0
@@ -95,7 +96,7 @@ export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, g
                                 : theme.bgInset,
                               borderRadius: 5,
                               display: "flex", alignItems: "center", justifyContent: "center",
-                              cursor: "pointer",
+                              cursor: c.fv > 0 ? "pointer" : "default",
                               transition: motion ? "transform 200ms, box-shadow 200ms" : "none",
                               transform: isHover && motion ? "scale(1.08)" : "scale(1)",
                               boxShadow: isHover ? `0 0 0 2px ${color}, 0 8px 16px -4px rgba(0,0,0,0.4)` : "none",
@@ -146,9 +147,12 @@ export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, g
   );
 }
 
+const BORROWER_CAP = 60;
+
 export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, motion, gsHighlight }) {
   const svgRef = useRef(null);
   const [hover, setHover] = useState(null);
+  const [drag, setDrag] = useState(null); // { id, dx, dy }
 
   const graph = useMemo(() => {
     const sel = investments.filter(i => selectedFunds.has(i.fund));
@@ -161,11 +165,11 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
       const r = i.nonAccrual ? 1 : ratioToRiskT(fvParPct(i.fv, i.par) ?? 100, false);
       byCompany[key].worstRisk = Math.max(byCompany[key].worstRisk, r);
     });
-    const shared = Object.entries(byCompany)
+    const allShared = Object.entries(byCompany)
       .filter(([, v]) => Object.keys(v.funds).length >= 2)
       .map(([k, v]) => ({ id: k, ...v }))
-      .sort((a, b) => b.totalFV - a.totalFV)
-      .slice(0, 28);
+      .sort((a, b) => b.totalFV - a.totalFV);
+    const shared = allShared.slice(0, BORROWER_CAP);
 
     const fundIds = funds.filter(f => selectedFunds.has(f.id)).map(f => f.id);
     const fundNodes = fundIds.map((fid) => ({ id: fid, kind: "fund", x: 0, y: 0, vx: 0, vy: 0 }));
@@ -176,12 +180,12 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
         if (fundIds.includes(fid)) edges.push({ source: fid, target: b.id, fv });
       });
     });
-    return { fundNodes, borrowerNodes, edges, fundIds, shared };
+    return { fundNodes, borrowerNodes, edges, fundIds, shared, totalShared: allShared.length };
   }, [investments, selectedFunds, funds]);
 
   const W = 880, H = 540;
 
-  const positioned = useMemo(() => {
+  const initialLayout = useMemo(() => {
     const nodes = [
       ...graph.fundNodes.map(n => ({ ...n })),
       ...graph.borrowerNodes.map(n => ({ ...n })),
@@ -238,16 +242,62 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
         n.y = Math.max(40, Math.min(H - 40, n.y));
       });
     }
-    return { nodes, idMap };
+    const map = {};
+    nodes.forEach(n => { map[n.id] = { x: n.x, y: n.y }; });
+    return map;
   }, [graph]);
+
+  // Mutable position state (so users can drag nodes around).
+  const [nodePos, setNodePos] = useState(initialLayout);
+  useEffect(() => { setNodePos(initialLayout); }, [initialLayout]);
+
+  function svgCoords(evt) {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    const local = pt.matrixTransform(ctm.inverse());
+    return { x: local.x, y: local.y };
+  }
+
+  function onNodePointerDown(id, evt) {
+    evt.stopPropagation();
+    const c = svgCoords(evt);
+    const cur = nodePos[id];
+    if (!c || !cur) return;
+    setDrag({ id, dx: cur.x - c.x, dy: cur.y - c.y });
+    evt.currentTarget.setPointerCapture?.(evt.pointerId);
+  }
+  function onPointerMove(evt) {
+    if (!drag) return;
+    const c = svgCoords(evt);
+    if (!c) return;
+    setNodePos(prev => ({
+      ...prev,
+      [drag.id]: {
+        x: Math.max(20, Math.min(W - 20, c.x + drag.dx)),
+        y: Math.max(20, Math.min(H - 20, c.y + drag.dy)),
+      },
+    }));
+  }
+  function onPointerUp() { setDrag(null); }
+
+  const subtitleSuffix = graph.totalShared > BORROWER_CAP
+    ? ` (top ${BORROWER_CAP} of ${graph.totalShared} by FV)`
+    : "";
 
   return (
     <div style={{ padding: "24px 32px" }}>
       <SectionHeader theme={theme} title="Cross-fund borrower graph"
-        subtitle={`${graph.shared.length} borrowers shared across 2+ selected funds · drag to inspect`} />
+        subtitle={`${graph.shared.length} borrowers shared across 2+ selected funds${subtitleSuffix} · drag any node to rearrange`} />
       <Panel theme={theme} padding={0}>
         <div style={{ position: "relative" }}>
-          <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", borderRadius: 10 }}>
+          <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`}
+            onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}
+            style={{ width: "100%", display: "block", borderRadius: 10, touchAction: "none", userSelect: "none" }}>
             <defs>
               <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
                 <stop offset="0%" stopColor={theme.bgPanel2} />
@@ -257,12 +307,12 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
             <rect width={W} height={H} fill="url(#bgGlow)" />
 
             {graph.edges.map((e, i) => {
-              const a = positioned.idMap[e.source];
-              const b = positioned.idMap[e.target];
+              const a = nodePos[e.source];
+              const b = nodePos[e.target];
               if (!a || !b) return null;
               const isHover = hover === e.target || hover === e.source;
-              const node = positioned.idMap[e.target];
-              const risk = node?.borrower?.worstRisk ?? 0;
+              const targetBorrower = graph.borrowerNodes.find(n => n.id === e.target)?.borrower;
+              const risk = targetBorrower?.worstRisk ?? 0;
               const color = riskColor(risk);
               return (
                 <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
@@ -274,15 +324,18 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
             })}
 
             {graph.fundNodes.map(n => {
-              const node = positioned.idMap[n.id];
+              const node = nodePos[n.id];
+              if (!node) return null;
               const isGS = GS_FUNDS.has(n.id);
               const fund = funds.find(f => f.id === n.id);
               const r = fund ? Math.max(14, Math.min(28, Math.sqrt(fund.totalFV / 30))) : 18;
+              const isDragging = drag?.id === n.id;
               return (
                 <g key={n.id}
+                  onPointerDown={(e) => onNodePointerDown(n.id, e)}
                   onMouseEnter={() => setHover(n.id)}
                   onMouseLeave={() => setHover(null)}
-                  style={{ cursor: "pointer" }}>
+                  style={{ cursor: isDragging ? "grabbing" : "grab" }}>
                   <circle cx={node.x} cy={node.y} r={r + 4}
                     fill={(gsHighlight && isGS) ? theme.accent : theme.text} opacity="0.08" />
                   <circle cx={node.x} cy={node.y} r={r}
@@ -290,6 +343,7 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
                     stroke={(gsHighlight && isGS) ? theme.accent : theme.textMuted}
                     strokeWidth="1.5" />
                   <text x={node.x} y={node.y + 4} textAnchor="middle"
+                    pointerEvents="none"
                     style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700, fill: (gsHighlight && isGS) ? theme.accent : theme.text }}>
                     {n.id}
                   </text>
@@ -298,23 +352,29 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
             })}
 
             {graph.borrowerNodes.map(n => {
-              const node = positioned.idMap[n.id];
+              const node = nodePos[n.id];
+              if (!node) return null;
               const b = n.borrower;
               const r = Math.max(4, Math.min(13, Math.sqrt(b.totalFV / 6)));
               const c = riskColor(b.worstRisk);
               const isHover = hover === n.id;
+              const isDragging = drag?.id === n.id;
               return (
                 <g key={n.id}
+                  onPointerDown={(e) => onNodePointerDown(n.id, e)}
                   onMouseEnter={() => setHover(n.id)}
                   onMouseLeave={() => setHover(null)}
-                  style={{ cursor: "pointer" }}>
+                  style={{ cursor: isDragging ? "grabbing" : "grab" }}>
+                  <circle cx={node.x} cy={node.y} r={Math.max(r, 8)}
+                    fill="transparent" />
                   <circle cx={node.x} cy={node.y} r={r}
                     fill={c}
-                    stroke={isHover ? theme.text : "transparent"}
+                    stroke={isHover || isDragging ? theme.text : "transparent"}
                     strokeWidth="2"
+                    pointerEvents="none"
                     style={{
-                      transition: motion ? "r 200ms" : "none",
-                      filter: `drop-shadow(0 0 ${isHover ? 8 : 3}px color-mix(in oklch, ${c} 60%, transparent))`,
+                      transition: motion && !isDragging ? "r 200ms" : "none",
+                      filter: `drop-shadow(0 0 ${isHover || isDragging ? 8 : 3}px color-mix(in oklch, ${c} 60%, transparent))`,
                     }} />
                   {isHover && (
                     <g>
@@ -340,19 +400,40 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
   );
 }
 
-export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHighlight }) {
+export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHighlight, soiInitialFilters }) {
   const [filterFund, setFilterFund] = useState("ALL");
+  const [filterIndustry, setFilterIndustry] = useState("ALL");
+  const [filterPik, setFilterPik] = useState("ALL");
   const [search, setSearch] = useState("");
   const [stress, setStress] = useState("ALL");
   const [sortKey, setSortKey] = useState("fv");
   const [sortDir, setSortDir] = useState("desc");
   const [hovered, setHovered] = useState(null);
 
+  // When the heatmap (or any other tab) hands us a deep-link, seed the filters.
+  useEffect(() => {
+    if (!soiInitialFilters) return;
+    if (soiInitialFilters.fund) setFilterFund(soiInitialFilters.fund);
+    if (soiInitialFilters.industry) setFilterIndustry(soiInitialFilters.industry);
+    if (soiInitialFilters.stress) setStress(soiInitialFilters.stress);
+    if (soiInitialFilters.search != null) setSearch(soiInitialFilters.search);
+    if (soiInitialFilters.pik) setFilterPik(soiInitialFilters.pik);
+  }, [soiInitialFilters]);
+
   const fundOpts = ["ALL", ...funds.map(f => f.id)];
+  const industryOpts = useMemo(() => {
+    const set = new Set();
+    investments.forEach(i => { if (selectedFunds.has(i.fund) && i.industry) set.add(i.industry); });
+    return ["ALL", ...Array.from(set).sort()];
+  }, [investments, selectedFunds]);
+  const pikOpts = ["ALL", "PIK only", "Cash only"];
 
   const rows = useMemo(() => {
     let r = investments.filter(i => selectedFunds.has(i.fund));
     if (filterFund !== "ALL") r = r.filter(i => i.fund === filterFund);
+    if (filterIndustry !== "ALL") r = r.filter(i => i.industry === filterIndustry);
+    if (filterPik === "PIK only") r = r.filter(i => parseRate(i.rate).pik);
+    else if (filterPik === "Cash only") r = r.filter(i => !parseRate(i.rate).pik);
     if (search.trim()) {
       const q = search.toLowerCase();
       r = r.filter(i => i.company.toLowerCase().includes(q) || (i.industry||"").toLowerCase().includes(q));
@@ -379,7 +460,7 @@ export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHig
       if (typeof av === "number") return sortDir === "asc" ? av - bv : bv - av;
       return sortDir === "asc" ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
     });
-  }, [investments, selectedFunds, filterFund, search, stress, sortKey, sortDir]);
+  }, [investments, selectedFunds, filterFund, filterIndustry, filterPik, search, stress, sortKey, sortDir]);
 
   function toggleSort(k) {
     if (sortKey === k) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -395,14 +476,18 @@ export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHig
   return (
     <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14, height: "100%" }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <select value={filterFund} onChange={e => setFilterFund(e.target.value)} style={inputStyle}>
-          {fundOpts.map(o => <option key={o}>{o}</option>)}
-        </select>
+        <FilterSelect label="Fund" value={filterFund} onChange={setFilterFund} options={fundOpts} theme={theme} />
+        <FilterSelect label="Industry" value={filterIndustry} onChange={setFilterIndustry} options={industryOpts} theme={theme} maxWidth={220} />
+        <FilterSelect label="PIK" value={filterPik} onChange={setFilterPik} options={pikOpts} theme={theme} title="Currently paying PIK (rate string contains 'PIK'). Cannot distinguish optional vs mandatory PIK from EDGAR data." />
+        <FilterSelect label="Stress" value={stress} onChange={setStress} options={["ALL","Non-accrual","Distress","Stress","Watch","Par"]} theme={theme} />
         <input type="text" placeholder="Search borrower or industry…" value={search}
-          onChange={e => setSearch(e.target.value)} style={{ ...inputStyle, width: 280 }} />
-        <select value={stress} onChange={e => setStress(e.target.value)} style={inputStyle}>
-          {["ALL","Non-accrual","Distress","Stress","Watch","Par"].map(o => <option key={o}>{o}</option>)}
-        </select>
+          onChange={e => setSearch(e.target.value)} style={{ ...inputStyle, width: 240 }} />
+        {(filterFund !== "ALL" || filterIndustry !== "ALL" || filterPik !== "ALL" || stress !== "ALL" || search) && (
+          <button onClick={() => { setFilterFund("ALL"); setFilterIndustry("ALL"); setFilterPik("ALL"); setStress("ALL"); setSearch(""); }}
+            style={{ ...inputStyle, cursor: "pointer", color: theme.textMuted, padding: "7px 12px" }}>
+            Clear
+          </button>
+        )}
         <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.textDim }}>
           {rows.length} positions
         </span>
@@ -608,5 +693,32 @@ export function StressTab({ investments, selectedFunds, theme, motion, gsHighlig
         </div>
       </Panel>
     </div>
+  );
+}
+
+function FilterSelect({ label, value, onChange, options, theme, maxWidth, title }) {
+  const isActive = value !== "ALL" && value !== options[0];
+  return (
+    <label title={title} style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      fontFamily: "'Inter Tight', sans-serif", fontSize: 10,
+      color: isActive ? theme.text : theme.textDim,
+      letterSpacing: 1, textTransform: "uppercase",
+    }}>
+      <span style={{ opacity: 0.8 }}>{label}</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          fontFamily: "'Inter Tight', sans-serif", fontSize: 12,
+          background: theme.bgInset,
+          border: `1px solid ${isActive ? theme.accent : theme.borderSoft}`,
+          color: theme.text, padding: "7px 12px", outline: "none", borderRadius: 6,
+          maxWidth: maxWidth || 160, textTransform: "none", letterSpacing: "normal",
+        }}
+      >
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
   );
 }

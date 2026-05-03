@@ -193,8 +193,15 @@ function FundCard({ fund, investments, theme, motion, gsHighlight, onDragStart, 
               <span style={{ fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {shortCompany(p.company, 28)}
               </span>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: riskColor(p.risk) }}>
-                {p.nonAccrual ? "n/a" : `${p.ratio.toFixed(0)}%`}
+              {p.nonAccrual && (
+                <span title="Non-accrual: borrower has stopped paying interest" style={{
+                  fontFamily: "'Inter Tight', sans-serif", fontSize: 8, fontWeight: 600, letterSpacing: 0.6,
+                  color: riskColor(0.95), padding: "1px 4px", borderRadius: 3,
+                  border: `1px solid color-mix(in oklch, ${riskColor(0.95)} 50%, transparent)`,
+                }}>NON-ACCR</span>
+              )}
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: riskColor(p.risk), minWidth: 36, textAlign: "right" }}>
+                {p.ratio != null ? `${p.ratio.toFixed(0)}%` : "—"}
               </span>
             </div>
           ))}
@@ -319,8 +326,11 @@ function ComparePanel({ a, b, investments, theme, motion, onClose }) {
           </div>
 
           <div>
-            <div style={{ fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.textDim, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 8 }}>
+            <div style={{ fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.textDim, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 4 }}>
               Shared borrowers ({sharedBorrowers.length})
+            </div>
+            <div style={{ fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.textDim, marginBottom: 10, lineHeight: 1.4 }}>
+              Borrowers held in <span style={{ color: aColor }}>{fa.id}</span> <em>and</em> <span style={{ color: bColor }}>{fb.id}</span>. Each value is that fund's fair-value exposure to the borrower; cell colour follows the FV/PAR risk gradient (cool = at par, warm = stressed, red = non-accrual).
             </div>
             {sharedBorrowers.length > 0 && (
               <div style={{ display: "grid", gridTemplateColumns: "1fr 56px 56px", padding: "0 10px 6px", gap: 10 }}>
