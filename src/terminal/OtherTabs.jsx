@@ -5,6 +5,7 @@ import {
 } from "./designTokens.js";
 import { parseRate } from "./analytics.js";
 import { Panel, SectionHeader, AnimatedValue } from "./Overview.jsx";
+import { BorrowerLink } from "./BorrowerProfile.jsx";
 
 export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, gsHighlight, drillToSOI }) {
   const [hover, setHover] = useState(null);
@@ -149,10 +150,11 @@ export function HeatmapTab({ funds, investments, selectedFunds, theme, motion, g
 
 const BORROWER_CAP = 60;
 
-export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, motion, gsHighlight }) {
+export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, motion, gsHighlight, drillToBorrower }) {
   const svgRef = useRef(null);
   const [hover, setHover] = useState(null);
   const [drag, setDrag] = useState(null); // { id, dx, dy }
+  const [downPos, setDownPos] = useState(null); // detect click vs drag
 
   const graph = useMemo(() => {
     const sel = investments.filter(i => selectedFunds.has(i.fund));
@@ -269,7 +271,14 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
     const cur = nodePos[id];
     if (!c || !cur) return;
     setDrag({ id, dx: cur.x - c.x, dy: cur.y - c.y });
+    setDownPos({ id, x: evt.clientX, y: evt.clientY });
     evt.currentTarget.setPointerCapture?.(evt.pointerId);
+  }
+  function onNodePointerUp(borrowerName, evt) {
+    if (downPos && Math.hypot(evt.clientX - downPos.x, evt.clientY - downPos.y) < 4 && borrowerName && drillToBorrower) {
+      drillToBorrower(borrowerName);
+    }
+    setDownPos(null);
   }
   function onPointerMove(evt) {
     if (!drag) return;
@@ -362,9 +371,10 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
               return (
                 <g key={n.id}
                   onPointerDown={(e) => onNodePointerDown(n.id, e)}
+                  onPointerUp={(e) => onNodePointerUp(b.name, e)}
                   onMouseEnter={() => setHover(n.id)}
                   onMouseLeave={() => setHover(null)}
-                  style={{ cursor: isDragging ? "grabbing" : "grab" }}>
+                  style={{ cursor: isDragging ? "grabbing" : "pointer" }}>
                   <circle cx={node.x} cy={node.y} r={Math.max(r, 8)}
                     fill="transparent" />
                   <circle cx={node.x} cy={node.y} r={r}
@@ -400,7 +410,7 @@ export function BorrowerGraphTab({ funds, investments, selectedFunds, theme, mot
   );
 }
 
-export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHighlight, soiInitialFilters }) {
+export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHighlight, soiInitialFilters, drillToBorrower }) {
   const [filterFund, setFilterFund] = useState("ALL");
   const [filterIndustry, setFilterIndustry] = useState("ALL");
   const [filterPik, setFilterPik] = useState("ALL");
@@ -545,7 +555,7 @@ export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHig
                     {inv.fund}
                   </td>
                   <td style={{ padding: "9px 14px", color: theme.text, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {shortCompany(inv.company, 36)}
+                    <BorrowerLink name={inv.company} display={shortCompany(inv.company, 36)} onClick={drillToBorrower} theme={theme} />
                   </td>
                   <td style={{ padding: "9px 14px", color: theme.textMuted, fontSize: 11 }}>{inv.industry}</td>
                   <td style={{ padding: "9px 14px", color: theme.textMuted, fontSize: 11 }}>{inv.investmentType}</td>
@@ -601,7 +611,7 @@ export function SOITab({ funds, investments, selectedFunds, theme, motion, gsHig
   );
 }
 
-export function StressTab({ investments, selectedFunds, theme, motion, gsHighlight }) {
+export function StressTab({ investments, selectedFunds, theme, motion, gsHighlight, drillToBorrower }) {
   const stressed = useMemo(() => {
     return investments
       .filter(i => selectedFunds.has(i.fund))
@@ -670,7 +680,9 @@ export function StressTab({ investments, selectedFunds, theme, motion, gsHighlig
                     background: i % 2 === 0 ? "transparent" : theme.bgInset,
                   }}>
                     <td style={{ padding: "8px 14px", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: gsHighlight && isGS ? theme.accent : theme.text, fontWeight: 600 }}>{inv.fund}</td>
-                    <td style={{ padding: "8px 14px", color: theme.text, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortCompany(inv.company, 36)}</td>
+                    <td style={{ padding: "8px 14px", color: theme.text, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <BorrowerLink name={inv.company} display={shortCompany(inv.company, 36)} onClick={drillToBorrower} theme={theme} />
+                    </td>
                     <td style={{ padding: "8px 14px", color: theme.textMuted, fontSize: 11 }}>{inv.industry}</td>
                     <td style={{ padding: "8px 14px", color: theme.textMuted, fontSize: 11 }}>{inv.investmentType}</td>
                     <td style={{ padding: "8px 14px", color: theme.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>{fmtM(inv.par)}</td>

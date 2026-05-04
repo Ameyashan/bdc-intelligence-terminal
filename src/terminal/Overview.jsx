@@ -74,7 +74,7 @@ function RiskDistribution({ investments, theme, motion, height = 6 }) {
   );
 }
 
-function FundCard({ fund, investments, theme, motion, gsHighlight, onDragStart, onDragOver, onDrop, isDropTarget, isDragging, density }) {
+function FundCard({ fund, investments, theme, motion, gsHighlight, onDragStart, onDragOver, onDrop, isDropTarget, isDragging, density, drillToBorrower }) {
   const [expanded, setExpanded] = useState(false);
   const isGS = GS_FUNDS.has(fund.id);
   const ratio = (fund.totalFV / fund.totalPar) * 100;
@@ -190,7 +190,14 @@ function FundCard({ fund, investments, theme, motion, gsHighlight, onDragStart, 
           {topStressed.map((p, i) => (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
               <span style={{ width: 4, height: 4, borderRadius: 99, background: riskColor(p.risk), flexShrink: 0 }} />
-              <span style={{ fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span
+                onClick={(e) => { e.stopPropagation(); drillToBorrower && drillToBorrower(p.company); }}
+                title={drillToBorrower ? `Open profile for ${p.company}` : undefined}
+                style={{
+                  fontFamily: "'Inter Tight', sans-serif", fontSize: 10, color: theme.text,
+                  flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  cursor: drillToBorrower ? "pointer" : "default",
+                }}>
                 {shortCompany(p.company, 28)}
               </span>
               {p.nonAccrual && (
@@ -438,7 +445,7 @@ function IndustryBars({ investments, theme, motion, gsHighlight }) {
   );
 }
 
-export function OverviewTab({ funds, investments, selectedFunds, theme, motion, gsHighlight, density, prevData }) {
+export function OverviewTab({ funds, investments, selectedFunds, theme, motion, gsHighlight, density, prevData, drillToBorrower }) {
   const [draggingId, setDraggingId] = useState(null);
   const [dropTargetId, setDropTargetId] = useState(null);
   const [comparePair, setComparePair] = useState(null);
@@ -535,6 +542,7 @@ export function OverviewTab({ funds, investments, selectedFunds, theme, motion, 
               motion={motion}
               gsHighlight={gsHighlight}
               density={density}
+              drillToBorrower={drillToBorrower}
               onDragStart={handleDragStart}
               onDragOver={handleDragOver}
               onDrop={handleDrop}

@@ -5,6 +5,7 @@ import { OverviewTab } from "./terminal/Overview.jsx";
 import { HeatmapTab, BorrowerGraphTab, SOITab, StressTab } from "./terminal/OtherTabs.jsx";
 import { GSLensTab } from "./terminal/GSLens.jsx";
 import { SignalsTab } from "./terminal/SignalsTab.jsx";
+import { BorrowerProfileTab } from "./terminal/BorrowerProfile.jsx";
 import { GLOBAL_CSS } from "./terminal/globalStyles.js";
 
 const THEME = THEMES.glass;
@@ -16,10 +17,17 @@ export default function BDCTerminal({ data, prevData }) {
   const [selectedFunds, setSelectedFunds] = useState(new Set(ALL_FUNDS));
   const [activeTab, setActiveTab] = useState("overview");
   const [soiInitialFilters, setSoiInitialFilters] = useState(null);
+  const [selectedBorrower, setSelectedBorrower] = useState(null);
 
   function drillToSOI(filters) {
     setSoiInitialFilters({ ...filters, _t: Date.now() });
     setActiveTab("soi");
+  }
+
+  function drillToBorrower(name) {
+    if (!name) return;
+    setSelectedBorrower(name);
+    setActiveTab("borrower");
   }
 
   useEffect(() => {
@@ -61,7 +69,7 @@ export default function BDCTerminal({ data, prevData }) {
 
   const { funds = [], investments = [] } = data;
   const fundCount = funds.filter(f => selectedFunds.has(f.id)).length;
-  const tabProps = { funds, investments, selectedFunds, theme: THEME, motion: MOTION, gsHighlight: GS_HIGHLIGHT, density: DENSITY, prevData, drillToSOI, soiInitialFilters };
+  const tabProps = { funds, investments, selectedFunds, theme: THEME, motion: MOTION, gsHighlight: GS_HIGHLIGHT, density: DENSITY, prevData, drillToSOI, drillToBorrower, soiInitialFilters, selectedBorrower, setActiveTab };
 
   return (
     <div style={{
@@ -83,6 +91,7 @@ export default function BDCTerminal({ data, prevData }) {
         {activeTab === "stress" && <StressTab {...tabProps} />}
         {activeTab === "gslens" && <GSLensTab {...tabProps} />}
         {activeTab === "signals" && <SignalsTab {...tabProps} />}
+        {activeTab === "borrower" && <BorrowerProfileTab {...tabProps} />}
       </div>
     </div>
   );

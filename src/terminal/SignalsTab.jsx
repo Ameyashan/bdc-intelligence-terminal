@@ -107,7 +107,8 @@ function FundBadge({ id, theme }) {
   );
 }
 
-export function SignalsTab({ investments, theme, motion, drillToSOI }) {
+export function SignalsTab({ investments, theme, motion, drillToSOI, drillToBorrower }) {
+  const openBorrower = drillToBorrower || ((name) => drillToSOI && drillToSOI({ search: shortCompany(name, 30) }));
   const [activeDetector, setActiveDetector] = useState("markDrift");
   const [topN, setTopN] = useState(20);
   const [sortKey, setSortKey] = useState(DEFAULT_SORT.markDrift.key);
@@ -254,9 +255,9 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
               <SignalRow key={i} theme={theme}>
                 <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 120px 90px 80px 60px", alignItems: "center", gap: 10 }}>
                   <FundBadge id={h.fund} theme={theme} />
-                  <div onClick={() => drillToSOI && drillToSOI({ search: shortCompany(h.company, 30) })}
+                  <div onClick={() => openBorrower(h.company)}
                     style={{ cursor: "pointer", color: theme.text }}
-                    title="Open in SOI">
+                    title="Open borrower profile">
                     {shortCompany(h.company, 60)}
                   </div>
                   <div style={{ fontSize: 11, color: theme.textDim }}>{h.industry}</div>
@@ -281,9 +282,9 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
               <SignalRow key={i} theme={theme}>
                 <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 130px 140px 90px 60px", alignItems: "center", gap: 10 }}>
                   <FundBadge id={h.fund} theme={theme} />
-                  <div onClick={() => drillToSOI && drillToSOI({ search: shortCompany(h.company, 30) })}
+                  <div onClick={() => openBorrower(h.company)}
                     style={{ cursor: "pointer", color: theme.text }}
-                    title="Open in SOI">
+                    title="Open borrower profile">
                     {shortCompany(h.company, 60)}
                   </div>
                   <div style={{ fontSize: 11, color: theme.textDim }}>{h.industry}</div>
@@ -305,9 +306,9 @@ export function SignalsTab({ investments, theme, motion, drillToSOI }) {
           return (
             <SignalRow key={i} theme={theme}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 60px 130px 90px", alignItems: "center", gap: 10 }}>
-                <div onClick={() => drillToSOI && drillToSOI({ search: shortCompany(h.borrower, 30) })}
+                <div onClick={() => openBorrower(h.borrower)}
                   style={{ cursor: "pointer", color: theme.text }}
-                  title="Open in SOI">
+                  title="Open borrower profile">
                   {shortCompany(h.borrower, 60)}
                   <span style={{ fontSize: 10, color: theme.textDim, marginLeft: 8, fontFamily: "'JetBrains Mono', monospace" }}>
                     {h.funds.join(" ")}
